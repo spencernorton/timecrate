@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/spencercnorton/timecrate/security/advisories/new
+    url: https://github.com/spencernorton/timecrate/security/advisories/new
     about: Report privately through GitHub's vulnerability reporting. Please do not open a public issue.
   - name: Question or idea
-    url: https://github.com/spencercnorton/timecrate/discussions
+    url: https://github.com/spencernorton/timecrate/discussions
     about: Ask how something works, or float an idea before writing it up as a feature request.
