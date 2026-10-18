@@ -1,8 +1,8 @@
 # Support
 
-- **Something is broken** — [open a bug report](https://github.com/spencercnorton/timecrate/issues/new/choose).
-- **A question, or an idea** — [Discussions](https://github.com/spencercnorton/timecrate/discussions).
-- **A security problem** — [private vulnerability reporting](https://github.com/spencercnorton/timecrate/security/advisories/new), never a public issue. See [SECURITY.md](SECURITY.md).
+- **Something is broken** — [open a bug report](https://github.com/spencernorton/timecrate/issues/new/choose).
+- **A question, or an idea** — [Discussions](https://github.com/spencernorton/timecrate/discussions).
+- **A security problem** — [private vulnerability reporting](https://github.com/spencernorton/timecrate/security/advisories/new), never a public issue. See [SECURITY.md](SECURITY.md).
 - **Documentation** — the README, `man timecrate`, and the guides in [docs/](docs/).
 - **Getting a machine back** — [docs/RESTORE.md](docs/RESTORE.md), or [docs/BREAK-GLASS.md](docs/BREAK-GLASS.md) if Timecrate itself is not available.
 
