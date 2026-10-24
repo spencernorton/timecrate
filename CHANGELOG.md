@@ -2,6 +2,14 @@
 
 All notable changes to Timecrate are documented here.
 
+## Unreleased
+
+- **The drill's unprivileged `verify --all` keeps the rclone settings.** It ran under
+  `sudo -u <user> env HOME=...`, and sudo's env reset dropped `RCLONE_PASSWORD_COMMAND`
+  (and `RCLONE_CONFIG`), so against a password-protected rclone config the sweep died at
+  a password prompt with no stdin while the root-run backup and drill proper worked. The
+  two variables are now forwarded explicitly when set.
+
 ## 3.0.1 — 2026-10-04
 
 - **The capstone decrypts on disk, and fails closed.** It decrypted the kit into `/tmp`, which on

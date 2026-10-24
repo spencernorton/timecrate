@@ -2904,5 +2904,35 @@ printf '%s' "$out64w" | grep -q 'a warning from the boot that never answered' \
   || no "the forced boot's journal and failed units are not in the alert"
 rm -rf /tmp/t64 /root/timecrate-capstone-work.* 2>/dev/null
 
+echo "== T65: the drill's unprivileged verify keeps the rclone password command =="
+# sudo env_reset drops RCLONE_PASSWORD_COMMAND, so `verify --all` under
+# `sudo -u user env HOME=...` met an encrypted rclone config with no way to
+# answer its password prompt and died on EOF, while the root-run backup
+# worked. The stub sudo models env_reset (env -i); only what the drill
+# passes explicitly can reach the stub timecrate.
+mkdir -p /tmp/t65/bin /tmp/t65/conf
+cat > /tmp/t65/bin/sudo <<'T65SUDO'
+#!/bin/bash
+[ "$1" = "-u" ] && shift 2
+exec env -i PATH="$PATH" "$@"
+T65SUDO
+cat > /tmp/t65/bin/timecrate <<'T65TC'
+#!/bin/bash
+case "$1" in
+  recovery-drill) echo "RECOVERY DRILL PASSED";;
+  verify) printf 'marker=%s\n' "${RCLONE_PASSWORD_COMMAND:-}" > /tmp/t65/mark; echo ok;;
+esac
+T65TC
+chmod +x /tmp/t65/bin/*
+env -u TIMECRATE_ESCROW_KEY_CMD -u TIMECRATE_ESCROW_SSH \
+  PATH=/tmp/t65/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  TIMECRATE_USER="$(id -un)" TIMECRATE_CONF=/tmp/t65/conf \
+  RCLONE_PASSWORD_COMMAND=t65-marker \
+  bash "$REPO/deploy/drill-and-alert.sh" >/tmp/t65/out 2>&1; drc=$?
+[ "$drc" = 0 ] && grep -q '^marker=t65-marker$' /tmp/t65/mark \
+  && ok "RCLONE_PASSWORD_COMMAND reaches the unprivileged verify across sudo" \
+  || no "verify lost the rclone password command: rc=$drc mark=$(cat /tmp/t65/mark 2>/dev/null)"
+rm -rf /tmp/t65
+
 echo "==== RESULT: $PASS PASS / $FAIL FAIL ===="
 [ "$FAIL" -eq 0 ]

@@ -58,8 +58,15 @@ printf '%s' "$OUT" | grep -q 'DRILL STALE' \
 # remote. `verify --all` dies on any failure, so its exit code is the whole check; measured at
 # ~3s/kit (45s for 15) against a cloud remote, which is noise beside the drill this runs next to.
 # Unprivileged on purpose: verify stages into the caller's own cache, and the keyring is the
-# user's. HOME is passed explicitly rather than trusted from sudo's env policy.
-VOUT="$(sudo -u "$TC_USER" env HOME="$USER_HOME" timeout 3600 "$TC" verify --all 2>&1)"; VRC=$?
+# user's. HOME is passed explicitly rather than trusted from sudo's env policy. The rclone
+# settings must cross explicitly too: sudo's env_reset drops them, so an encrypted rclone
+# config (RCLONE_PASSWORD_COMMAND from the service environment) otherwise leaves the
+# unprivileged verify at a password prompt with no stdin — the drill dies on EOF while the
+# root-run backup works. Only the two rclone variables are forwarded, and only when set.
+VEN=(HOME="$USER_HOME")
+[ -n "${RCLONE_CONFIG:-}" ] && VEN+=(RCLONE_CONFIG="$RCLONE_CONFIG")
+[ -n "${RCLONE_PASSWORD_COMMAND:-}" ] && VEN+=(RCLONE_PASSWORD_COMMAND="$RCLONE_PASSWORD_COMMAND")
+VOUT="$(sudo -u "$TC_USER" env "${VEN[@]}" timeout 3600 "$TC" verify --all 2>&1)"; VRC=$?
 printf '%s\n' "$VOUT" | tail -3
 if [ "$VRC" -eq 124 ]; then
   critical="${critical:+$critical; }verify --all TIMED OUT — the archive could not be checked this run"
