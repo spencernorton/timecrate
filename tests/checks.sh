@@ -3001,13 +3001,13 @@ if PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf "$TC" 
     && ok "Drive sign-in creates the gdrive remote in the dedicated config" \
     || no "Drive sign-in used the wrong config: $(cat /tmp/tm/rclone65.log 2>/dev/null)"
 else no "Drive connect failed against the fake: $(tail -2 /tmp/t65d.out)"; fi
-PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf "$TC" remote browse gdrive:Apollo >/dev/null 2>&1
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf "$TC" remote browse gdrive:Backups >/dev/null 2>&1
 PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf TIMECRATE_RCLONE_CONF=/tmp/tm/main65.conf "$TC" remote browse dropbox:elsewhere >/dev/null 2>&1
-grep -q -- '--config /tmp/tm/drive65.conf lsd gdrive:Apollo' /tmp/tm/rclone65.log \
+grep -q -- '--config /tmp/tm/drive65.conf lsd gdrive:Backups' /tmp/tm/rclone65.log \
   && ok "commands naming gdrive: use the Drive config" || no "gdrive browse did not use the Drive config"
 grep -q -- '--config /tmp/tm/main65.conf lsd dropbox:elsewhere' /tmp/tm/rclone65.log \
   && ok "other remotes still use the main rclone config" || no "dropbox browse lost the main config"
-PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_REMOTE=gdrive:Apollo TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf \
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_REMOTE=gdrive:Backups TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf \
   "$TC" remote status >/tmp/t65st.out 2>&1
 grep -q 'backend      drive (rclone remote "gdrive")' /tmp/t65st.out \
   && ok "remote status names the Drive backend from its own config" \

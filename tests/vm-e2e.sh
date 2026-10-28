@@ -11,7 +11,7 @@
 # leg instead, seed a signed-in rclone Drive config on the host and point at a
 # throwaway Drive folder (the config is transferred as a file, never printed):
 #   TIMECRATE_E2E_DRIVE_CONF=~/.config/timecrate/rclone-drive.conf \
-#   TIMECRATE_E2E_DRIVE_PATH=gdrive:Apollo/_e2e-test \
+#   TIMECRATE_E2E_DRIVE_PATH=gdrive:Backups/_e2e-test \
 #     tests/vm-e2e.sh
 # The VM is always deleted. Run scripts/build.sh first.
 set -euo pipefail
