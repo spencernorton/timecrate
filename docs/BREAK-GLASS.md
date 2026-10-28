@@ -17,6 +17,22 @@ and `tar` — plus the escrowed secret key. Nothing from this project has to be 
 - **The signing public key**: `timecrate-signing-public.asc`, which proves the kit is yours. It is
   on the escrow sheet, with its fingerprint.
 
+## 0b. PQ-wrapped kits (TIMECRATE_CRYPTO=hybrid, 3.1.0+)
+
+A hybrid kit's first line starts with `TIMECRATE-PQ1`. It is the signed kit below wrapped in
+one more envelope, and it needs the PQ secret key from the escrow sheet (`pq-secret.pem`)
+plus OpenSSL 3.5+ before any of the GPG steps:
+
+```sh
+head -n1 KIT | cut -d' ' -f4 | base64 -d > kem.ct
+openssl pkeyutl -decap -inkey pq-secret.pem -in kem.ct -secret kem.ss
+od -An -tx1 -v kem.ss | tr -d ' \n' > kem.pass
+tail -n +2 KIT | gpg --batch --pinentry-mode loopback --passphrase-file kem.pass -d -o inner.gpg
+```
+
+`inner.gpg` is now the ordinary signed kit: continue at step 1 with it. Classic kits (no
+`TIMECRATE-PQ1` first line) skip this section entirely.
+
 ## 1. Import the keys
 
 ```sh

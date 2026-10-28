@@ -24,8 +24,10 @@ override_dh_auto_install:
 	install -D -m 0755 gui/timecrate-gui debian/timecrate-gui/usr/bin/timecrate-gui
 	install -D -m 0644 gui/dev.norvi.Timecrate.desktop \
 	  debian/timecrate-gui/usr/share/applications/dev.norvi.Timecrate.desktop
-	install -D -m 0644 gui/dev.norvi.Timecrate.svg \
-	  debian/timecrate-gui/usr/share/icons/hicolor/scalable/apps/dev.norvi.Timecrate.svg
+	for s in 512 256 128; do \
+	  install -D -m 0644 "gui/dev.norvi.Timecrate-$$s.png" \
+	    "debian/timecrate-gui/usr/share/icons/hicolor/$${s}x$${s}/apps/dev.norvi.Timecrate.png"; \
+	done
 	install -D -m 0644 gui/dev.norvi.Timecrate.policy \
 	  debian/timecrate-gui/usr/share/polkit-1/actions/dev.norvi.Timecrate.policy
 

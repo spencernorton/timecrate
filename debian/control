@@ -11,6 +11,8 @@ Package: timecrate
 Architecture: all
 Depends: ${misc:Depends},
          gnupg,
+         gpg-agent,
+         openssl,
          python3:any,
          rclone,
          zstd

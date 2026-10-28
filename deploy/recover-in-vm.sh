@@ -48,7 +48,7 @@ fi
 
 echo "S1: install recovery tools (gpg, zstd, dconf) on the real OS"
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq gpg zstd dconf-cli dbus >/dev/null 2>&1
+apt-get install -y -qq gpg gpg-agent openssl zstd dconf-cli dbus >/dev/null 2>&1
 { command -v gpg && command -v zstd; } >/dev/null && ok "gpg + zstd installed" || no "tools not installable"
 
 echo "S2: import ONLY the escrowed key"
@@ -68,6 +68,22 @@ DEC=$IN/kit.tar.zst; ST=$IN/gpg-status
 mkdir -p /restore
 want=$(gpg --batch --show-keys --with-colons "$IN/signing-pub.asc" 2>/dev/null | awk -F: '/^fpr/{print $10; exit}')
 gpg --batch --import "$IN/signing-pub.asc" >/dev/null 2>&1
+# Tool-independent PQ unwrap before the existing signature gate.
+if [ "$(head -c 13 "$KIT")" = TIMECRATE-PQ1 ]; then
+  if ! (
+    set -euo pipefail
+    umask 077
+    head -n1 "$KIT" | cut -d' ' -f4 | base64 -d > "$IN/kem.ct"
+    openssl pkeyutl -decap -inkey "$IN/pq-secret.pem" -in "$IN/kem.ct" -secret "$IN/kem.ss"
+    od -An -tx1 -v "$IN/kem.ss" | tr -d ' \n' > "$IN/kem.pass"
+    tail -n +2 "$KIT" | gpg --batch --yes --pinentry-mode loopback --passphrase-file "$IN/kem.pass" -o "$IN/inner.gpg" -d
+  ) 2>"$IN/pq.err"; then
+    rm -f "$IN/kem.ct" "$IN/kem.ss" "$IN/kem.pass" "$IN/inner.gpg"
+    no "PQ envelope recovery failed; nothing extracted"; result
+  fi
+  mv "$IN/inner.gpg" "$KIT"
+  rm -f "$IN/kem.ct" "$IN/kem.ss" "$IN/kem.pass"
+fi
 grc=0; gpg --batch --no-tty --yes --status-file "$ST" -o "$DEC" -d "$KIT" 2>"$IN/gpg.err" || grc=$?
 got=$(awk '/^\[GNUPG:\] VALIDSIG /{print $3; exit}' "$ST" 2>/dev/null)
 # As the engine decides it: a clean exit, a completed decryption, and a valid signature by the

@@ -210,6 +210,14 @@ class Probe(Adw.Application):
                         failures.append("encrypt-only machine got no 'cannot restore here' hint")
                     if kp.btn_export.get_sensitive():
                         failures.append("export offered on a box whose secret key is gone")
+                    # the stub predates the PQ key: classic posture, no PQ pill, PDF offered
+                    if kp.crypto_row.get_selected() != 0:
+                        failures.append("crypto combo is %d for a classic machine"
+                                        % kp.crypto_row.get_selected())
+                    if kp.p_pq.get_label() != "NOT SET UP":
+                        failures.append("pq pill is %r with no PQ key" % kp.p_pq.get_label())
+                    if not kp.btn_sheet_pdf.get_sensitive():
+                        failures.append("PDF recovery-sheet download not offered")
                     if not kp.btn_verify.get_sensitive():
                         failures.append("verify disabled despite a configured key")
                     # nothing that could carry key material may reach the activity pane
@@ -265,8 +273,28 @@ class Probe(Adw.Application):
                     if rp.btn_connect.get_label() != "Re-authorise…":
                         failures.append("connect button says %r for an already-configured remote"
                                         % rp.btn_connect.get_label())
+                    # the provider choice starts from the configured remote (dropbox here), and
+                    # Drive reports its own sign-in state beside it
+                    if rp.provider_row.get_selected() != 1:
+                        failures.append("provider combo is %d for a dropbox remote"
+                                        % rp.provider_row.get_selected())
+                    if "not signed in" not in (rp.r_drive.get_subtitle() or ""):
+                        failures.append("drive row rendered %r with no Drive sign-in"
+                                        % rp.r_drive.get_subtitle())
                     if "@" not in (rp.r_account.get_subtitle() or ""):
                         failures.append("account not shown: %r" % rp.r_account.get_subtitle())
+                    # Reconnecting an existing Drive account must reach OAuth rather than
+                    # fail the engine's existing-config guard. Capture without starting OAuth.
+                    old_async = tcgui.run_async
+                    calls = []
+                    tcgui.run_async = lambda argv, callback: calls.append(argv)
+                    rp.info["drive_configured"] = True
+                    rp.provider_row.set_selected(0)
+                    rp._connect()
+                    tcgui.run_async = old_async
+                    rp.provider_row.set_selected(1)
+                    if not calls or "--reauthorize" not in calls[0]:
+                        failures.append("Drive reconnect omitted --reauthorize: %r" % calls)
                     # nothing token-shaped may ever reach the UI
                     for w in (rp.r_token, rp.r_account, rp.r_path):
                         t = (w.get_subtitle() or "")

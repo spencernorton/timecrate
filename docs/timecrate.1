@@ -1,4 +1,4 @@
-.TH TIMECRATE 1 "2026-10-04" "timecrate 3.0.1" "System Administration"
+.TH TIMECRATE 1 "2026-10-28" "timecrate 3.1.1" "System Administration"
 .SH NAME
 timecrate \- encrypted, signed, off\-site disaster\-recovery backup
 .SH SYNOPSIS
@@ -122,9 +122,17 @@ recorded anchor for deletion or rollback.
 Self\-test the whole crypto and fidelity pipeline offline in a throwaway keyring, including a
 forged\-kit refusal. No root, no network.
 .TP
-.B escrow\-doc " [\fIoutfile\fR]"
-Write a printable recovery sheet holding the secret key, the signing public key and the manual
-recovery steps. Refuses to write anywhere inside the backup set.
+.B escrow\-doc " [\fB\-\-format\fR \fBtxt\fR|\fBpdf\fR] [\fIoutfile\fR]"
+Write a printable recovery sheet holding the secret key, the signing public key, the
+post\-quantum secret key when one exists, and the manual recovery steps, as plain text or as a
+PDF (\fB\-\-format\fR, or a \fB.pdf\fR suffix). Refuses to write anywhere inside the backup set.
+.TP
+.B pq " \fBinit\fR|\fBstatus\fR [\fB\-\-json\fR]"
+Manage the ML\-KEM\-1024 post\-quantum keypair. With
+.B TIMECRATE_CRYPTO=hybrid
+each new kit is the ordinary signed GPG kit wrapped in a PQ envelope whose shared secret keys a
+symmetric AES\-256 layer; opening one needs both secrets. \fBinit\fR also runs it. Classic kits
+stay readable either way.
 .TP
 .B escrow\-confirm
 Record that the key is safely escrowed off this machine. Clears the backup warning.
@@ -151,6 +159,10 @@ the token itself.
 .B connect " [\fB\-\-provider\fR \fIname\fR] [\fB\-\-reauthorize\fR]"
 Run the provider's authorisation and store it in rclone's config. Detects a session with no
 browser and prints the \fBrclone authorize\fR half of the dance instead of hanging.
+\fB\-\-provider drive\fR is Google Drive direct sign\-in: its own rclone remote
+(\fBTIMECRATE_DRIVE_REMOTE\fR, default \fBgdrive\fR) in its own config
+(\fBTIMECRATE_DRIVE_CONF\fR), independent of the main rclone config; afterwards pick the backup
+folder with \fBbrowse\fR and \fBset\-path\fR.
 .TP
 .B test
 Prove the remote both lists and accepts writes, and name the reason when it does not: a missing

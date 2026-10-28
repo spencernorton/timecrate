@@ -1,3 +1,26 @@
+timecrate (3.1.1) resolute; urgency=medium
+
+  * Stage the PQ escrow secret and unwrap hybrid kits in the quarterly
+    recovery guest before signature verification.
+  * New application icon (blue crate with clock emblem), shipped as PNG at
+    512/256/128 px in place of the scalable SVG.
+  * Recovery drill now unwraps hybrid (ML-KEM) kits through the common
+    reader instead of decrypting them raw, which failed every PQ kit.
+
+ -- Norvi <apt@globalentry.systems>  Wed, 28 Oct 2026 18:30:00 +0000
+
+timecrate (3.1.0) resolute; urgency=medium
+
+  * Google Drive direct sign-in: `remote connect --provider drive` runs the
+    OAuth flow into a dedicated rclone config, and the window offers Drive
+    as a first-class destination with the existing folder picker.
+  * Post-quantum hybrid kits: TIMECRATE_CRYPTO=hybrid wraps each new kit
+    in an ML-KEM-1024 envelope (OpenSSL) around the unchanged signed GPG
+    kit. Classic kits stay readable; the escrow sheet carries both
+    secrets and can be downloaded as TXT or PDF.
+
+ -- Norvi <apt@globalentry.systems>  Wed, 28 Oct 2026 00:00:00 +0000
+
 timecrate (3.0.1) resolute; urgency=medium
 
   * The quarterly capstone decrypts the kit on disk instead of /tmp, which
