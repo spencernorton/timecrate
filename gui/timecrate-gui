@@ -1149,6 +1149,17 @@ class RemotePage(Adw.PreferencesPage):
         self.r_token = self._row(conn, "Authorisation", "dialog-password-symbolic")
         self.r_reach, self.p_reach = self._pill(conn, "Reachable", "network-transmit-receive-symbolic")
         self.r_quota = self._row(conn, "Space", "drive-harddisk-symbolic")
+        self.provider_row = Adw.ComboRow(
+            title="Provider",
+            subtitle="Google Drive signs in with its own account, in its own rclone config")
+        provider_model = Gtk.StringList()
+        provider_model.append("Google Drive")
+        provider_model.append("Dropbox")
+        self.provider_row.set_model(provider_model)
+        self.provider_row.set_selected(0)
+        self.provider_row.connect("notify::selected", lambda *_: self._provider_changed())
+        conn.add(self.provider_row)
+        self.r_drive = self._row(conn, "Google Drive", "folder-remote-symbolic")
 
         act = Adw.PreferencesGroup(title="Actions")
         self.add(act)
@@ -1230,8 +1241,22 @@ class RemotePage(Adw.PreferencesPage):
         used, total = d.get("remote_quota_used", ""), d.get("remote_quota_total", "")
         self.r_quota.set_subtitle("%s of %s used" % (human_bytes(used), human_bytes(total))
                                   if total else "not reported by this provider")
+        if d.get("drive_signed_in"):
+            self.r_drive.set_subtitle("signed in as %s — backups can use %s:<folder>"
+                                      % (d.get("drive_account") or "your Google account",
+                                         d.get("drive_remote") or "gdrive"))
+        elif d.get("drive_configured"):
+            self.r_drive.set_subtitle("configured, but the token is not valid — sign in again")
+        else:
+            self.r_drive.set_subtitle("not signed in — choose Google Drive, then Sign in")
         self.btn_test.set_sensitive(bool(remote))
         self.btn_disconnect.set_sensitive(bool(remote))
+        # the provider choice starts from the remote this machine actually uses, so the
+        # Connect button keeps describing THAT sign-in until the user picks another
+        rtype = (d.get("type") or "").lower()
+        self.provider_row.set_selected(
+            0 if rtype == "drive" or not d.get("configured") else 1)
+        self._provider_changed()
 
     # ---------- actions ----------
 
@@ -1243,9 +1268,21 @@ class RemotePage(Adw.PreferencesPage):
         self.reload()
         self.window.refresh()
 
+    def _provider_changed(self):
+        if self.provider_row.get_selected() == 0:      # Google Drive
+            self.btn_connect.set_label(
+                "Re-authorise Google…" if self.info.get("drive_signed_in")
+                else "Sign in with Google…")
+        else:                                          # Dropbox (the historical default)
+            self.btn_connect.set_label(
+                "Re-authorise…" if self.info.get("configured") else "Connect…")
+
     def _connect(self):
+        drive = self.provider_row.get_selected() == 0
+        argv = ([TC, "remote", "connect", "--provider", "drive"] if drive
+                else [TC, "remote", "connect"])
         self.btn_connect.set_sensitive(False)
-        self.window.log_line("$ timecrate remote connect")
+        self.window.log_line("$ " + " ".join(argv[1:]))
         self.window.toast("Finish the sign-in in your browser")
 
         def done(ok, out):
@@ -1256,10 +1293,15 @@ class RemotePage(Adw.PreferencesPage):
             if ok:
                 self.window.toast("Connected")
                 self._after_change()
+                if drive:
+                    # Signed in: the next decision is which folder, so open the picker there.
+                    FolderPicker(self.window,
+                                 "%s:" % (self.info.get("drive_remote") or "gdrive"),
+                                 self._after_change).present(self.window)
             else:
                 self.window.report(msg or "Could not connect.")
 
-        run_async([TC, "remote", "connect"], done)
+        run_async(argv, done)
 
     def _test(self):
         self.btn_test.set_sensitive(False)
@@ -1327,6 +1369,30 @@ class KeysPage(Adw.PreferencesPage):
         self.r_enc, self.p_enc = self._pill(ident, "Encryption key", "channel-secure-symbolic")
         self.r_sign = self._row(ident, "Signing key", "emblem-ok-symbolic")
         self.r_escrow, self.p_escrow = self._pill(ident, "Escrow", "security-high-symbolic")
+        self.r_pq, self.p_pq = self._pill(ident, "Post-quantum key", "channel-secure-symbolic")
+
+        crypto = Adw.PreferencesGroup(
+            title="Encryption",
+            description="Hybrid wraps each new backup in an ML-KEM-1024 post-quantum envelope "
+                        "around the same signed GPG kit; opening one needs both secret keys, "
+                        "and both are on the recovery sheet. Backups already made stay readable "
+                        "either way.")
+        self.add(crypto)
+        self.crypto_row = Adw.ComboRow(
+            title="Encryption algorithm",
+            subtitle="Applies to new backups; change it any time")
+        crypto_model = Gtk.StringList()
+        crypto_model.append("Classic — RSA-4096 + AES-256")
+        crypto_model.append("Hybrid — ML-KEM-1024 + RSA-4096 (post-quantum)")
+        self.crypto_row.set_model(crypto_model)
+        self.crypto_row.set_selected(0)
+        self._crypto_guard = False
+        self.crypto_row.connect("notify::selected", lambda *_: self._crypto_changed())
+        crypto.add(self.crypto_row)
+        self.btn_pq = self._action(
+            crypto, "Post-quantum key",
+            "Hybrid backups wrap to this ML-KEM-1024 key. Generate it once, then download a "
+            "fresh recovery sheet — the sheet is its escrow.", "Generate", self._pq_init)
 
         act = Adw.PreferencesGroup(
             title="Recovery",
@@ -1347,8 +1413,12 @@ class KeysPage(Adw.PreferencesPage):
             "Write the secret key out so you can move it somewhere this machine is not. Refuses "
             "any location that would end up inside a backup.", "Export…", self._export)
         self.btn_sheet = self._action(
-            act, "Recovery sheet", "A printable page with the key and the steps to use it.",
+            act, "Recovery sheet (TXT)", "A printable plain-text page with the keys (GPG and, "
+            "when present, the post-quantum key) and the steps to use them.",
             "Write…", self._sheet)
+        self.btn_sheet_pdf = self._action(
+            act, "Recovery sheet (PDF)", "The same sheet as a printable PDF, for download and "
+            "storage with your other recovery documents.", "Write PDF…", self._sheet_pdf)
         self.btn_confirm = self._action(
             act, "Mark the key as escrowed",
             "Records that a copy exists off this machine, and which key it is. Needs "
@@ -1417,6 +1487,7 @@ class KeysPage(Adw.PreferencesPage):
             w._set_pill(self.p_enc, "UNREADABLE", "error")
             self.r_sign.set_subtitle("unknown while the key store is unreadable")
             self.r_escrow.set_subtitle("unknown while the key store is unreadable")
+            self.r_pq.set_subtitle("unknown while the key store is unreadable")
             w._set_pill(self.p_escrow, "UNKNOWN", "warning")
             for b in (self.btn_export, self.btn_verify, self.btn_import):
                 b.set_sensitive(False)
@@ -1462,6 +1533,21 @@ class KeysPage(Adw.PreferencesPage):
         else:
             self.r_escrow.set_subtitle("no copy of this key is known to exist off this machine")
             w._set_pill(self.p_escrow, "ACTION NEEDED", "error")
+
+        pqfpr = k.get("pq_fpr") or ""
+        if pqfpr and k.get("pq_secret_present"):
+            self.r_pq.set_subtitle("%s… — ML-KEM-1024, secret on this box" % pqfpr[:16])
+            w._set_pill(self.p_pq, "READY", "success")
+        elif pqfpr:
+            self.r_pq.set_subtitle("%s… — public key only; the secret is escrow-only" % pqfpr[:16])
+            w._set_pill(self.p_pq, "ESCROW ONLY", "warning")
+        else:
+            self.r_pq.set_subtitle("none — hybrid backups need one (Encryption section)")
+            w._set_pill(self.p_pq, "NOT SET UP", "warning")
+        self.btn_pq.set_sensitive(not pqfpr)
+        self._crypto_guard = True
+        self.crypto_row.set_selected(1 if k.get("crypto") == "hybrid" else 0)
+        self._crypto_guard = False
 
         self.btn_export.set_sensitive(bool(k.get("encryption_secret_present")))
         self.btn_verify.set_sensitive(bool(fpr))
@@ -1523,9 +1609,15 @@ class KeysPage(Adw.PreferencesPage):
         dialog.save(self.window, None, picked)
 
     def _sheet(self):
+        self._sheet_save("txt")
+
+    def _sheet_pdf(self):
+        self._sheet_save("pdf")
+
+    def _sheet_save(self, fmt):
         dialog = Gtk.FileDialog()
         dialog.set_title("Write the recovery sheet")
-        dialog.set_initial_name("timecrate-recovery-sheet.txt")
+        dialog.set_initial_name("timecrate-recovery-sheet.%s" % fmt)
 
         def picked(source, result):
             try:
@@ -1536,14 +1628,47 @@ class KeysPage(Adw.PreferencesPage):
             def done(ok, out):
                 if ok:
                     self.window.toast("Recovery sheet written")
-                    self.window.log_line("recovery sheet written to %s" % path)
+                    self.window.log_line("recovery sheet (%s) written to %s" % (fmt, path))
                 else:
                     self.window.report(self.window._clean(
                         out.strip().splitlines()[-1] if out.strip() else "") or "Failed.")
 
-            run_async([TC, "escrow-doc", path], done)
+            run_async([TC, "escrow-doc", "--format", fmt, path], done)
 
         dialog.save(self.window, None, picked)
+
+    def _crypto_changed(self):
+        if self._crypto_guard:
+            return
+        value = "hybrid" if self.crypto_row.get_selected() == 1 else "classic"
+        try:
+            path = write_user_config({"TIMECRATE_CRYPTO": value})
+        except OSError as exc:
+            self.window.report("Could not save the encryption setting: %s" % exc)
+            return
+        self.keys["crypto"] = value
+        self.window.log_line("encryption algorithm set to %s (written to %s)" % (value, path))
+        self.window.toast("Encryption: %s"
+                          % ("Hybrid (post-quantum)" if value == "hybrid" else "Classic"))
+        if value == "hybrid" and not self.keys.get("pq_fpr"):
+            self.window.report(
+                "Hybrid is on, but there is no post-quantum key yet — Generate one in the "
+                "Encryption section, then download a fresh recovery sheet.")
+        self.window.refresh()
+
+    def _pq_init(self):
+        self.btn_pq.set_sensitive(False)
+
+        def done(ok, out):
+            last = out.strip().splitlines()[-1] if out.strip() else ""
+            if ok:
+                self.window.toast("Post-quantum key ready — download a fresh recovery sheet")
+                self.window.log_line(self.window._clean(last))
+            else:
+                self.window.report(self.window._clean(last) or "Could not generate the PQ key.")
+            self.reload()
+
+        run_async([TC, "pq", "init"], done)
 
     def _confirm_escrow(self):
         dialog = Adw.AlertDialog(

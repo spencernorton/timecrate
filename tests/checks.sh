@@ -14,7 +14,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
 # gpg-agent by name: an image where another package already pulled in gpg without its
 # recommends has no agent, and every key operation then fails.
-apt-get install -y -qq zstd gpg gpg-agent python3 acl shellcheck sudo >/dev/null 2>&1   # sudo: break-glass extracts through it
+apt-get install -y -qq zstd gpg gpg-agent python3 acl shellcheck sudo openssl >/dev/null 2>&1   # sudo: break-glass extracts through it; openssl: ML-KEM envelope
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 TC="$REPO/timecrate"
@@ -2903,6 +2903,116 @@ printf '%s' "$out64w" | grep -q 'a warning from the boot that never answered' \
   && ok "and the alert carries that boot's warnings and the failed units" \
   || no "the forced boot's journal and failed units are not in the alert"
 rm -rf /tmp/t64 /root/timecrate-capstone-work.* 2>/dev/null
+
+echo "== T65: post-quantum hybrid kits, Drive config routing, escrow PDF (3.1.0) =="
+if "$TC" pq status --json 2>/dev/null | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["supported"] else 1)' 2>/dev/null; then
+  ok "openssl reports ML-KEM-1024"
+else no "openssl has no ML-KEM-1024 in this image"; fi
+if "$TC" pq init >/tmp/t65pq.out 2>&1 && [ -s "$TIMECRATE_CONF/pq-secret.pem" ] && [ -s "$TIMECRATE_CONF/pq-public.pem" ]; then
+  ok "pq init creates the ML-KEM-1024 keypair"
+else no "pq init failed: $(tail -2 /tmp/t65pq.out)"; fi
+pqfpr1="$("$TC" pq status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["fpr"])' 2>/dev/null)"
+"$TC" pq init >/dev/null 2>&1
+[ "$("$TC" pq status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["fpr"])' 2>/dev/null)" = "$pqfpr1" ] \
+  && ok "second pq init is idempotent (no key churn)" || no "second pq init changed the PQ key"
+
+mkdir -p /tmp/tm/staging-pq
+if TIMECRATE_CRYPTO=hybrid TIMECRATE_STAGING=/tmp/tm/staging-pq TIMECRATE_INCLUDE=/tmp/inc.small TIMECRATE_EXCLUDE=/tmp/exc.small \
+     "$TC" backup --no-upload --force >/tmp/t65.out 2>&1; then
+  pkit="$(ls /tmp/tm/staging-pq/timecrate-*.tar.zst.gpg 2>/dev/null | head -1)"
+  head -n1 "$pkit" 2>/dev/null | grep -q '^TIMECRATE-PQ1 ML-KEM-1024 ' \
+    && ok "hybrid kit carries the PQ envelope header" || no "hybrid kit has no PQ header: $(head -c 40 "$pkit" 2>/dev/null)"
+  grep -q '"crypto":"hybrid"' /tmp/tm/staging-pq/timecrate-*.meta.json 2>/dev/null \
+    && ok "kit meta records crypto=hybrid" || no "kit meta does not record crypto=hybrid"
+  "$TC" verify "$pkit" >/tmp/t65v.out 2>&1 && grep -q 'VERIFY OK' /tmp/t65v.out \
+    && ok "hybrid kit verifies (PQ unwrap + signature)" || no "hybrid verify failed: $(tail -2 /tmp/t65v.out)"
+  if TIMECRATE_STAGING=/tmp/tm/staging-pq "$TC" restore --local "$pkit" >/tmp/t65r.out 2>&1; then
+    ext="$(find /tmp/tm/staging-pq -path '*extracted/tmp/tiny/f' 2>/dev/null | head -1)"
+    [ -n "$ext" ] && [ "$(cat "$ext")" = hello ] \
+      && ok "hybrid kit restores content intact" || no "hybrid restore lost the payload"
+  else no "hybrid restore failed: $(tail -2 /tmp/t65r.out)"; fi
+  cp "$pkit" /tmp/t65tamper.gpg; printf 'garbage' | dd of=/tmp/t65tamper.gpg bs=1 seek=3000 conv=notrunc 2>/dev/null
+  "$TC" verify /tmp/t65tamper.gpg >/tmp/t65t.out 2>&1 \
+    && no "tampered hybrid kit VERIFIED" || ok "tampered hybrid kit is rejected"
+  mv "$TIMECRATE_CONF/pq-secret.pem" /tmp/t65pq.bak
+  if "$TC" verify "$pkit" >/tmp/t65m.out 2>&1; then
+    no "hybrid kit verified WITHOUT its PQ secret"
+  else
+    grep -q 'no PQ secret key' /tmp/t65m.out \
+      && ok "hybrid kit without the PQ secret fails, naming the escrow" \
+      || no "missing-PQ-secret failure is not truthful: $(tail -1 /tmp/t65m.out)"
+  fi
+  mv /tmp/t65pq.bak "$TIMECRATE_CONF/pq-secret.pem"
+  # escrow round-trip: wipe the PQ keypair, reinstall ONLY from the sheet's PEM, kit opens again
+  cp "$TIMECRATE_CONF/pq-secret.pem" /tmp/t65pq-escrow.pem
+  rm -f "$TIMECRATE_CONF/pq-secret.pem" "$TIMECRATE_CONF/pq-public.pem"
+  if "$TC" pq import /tmp/t65pq-escrow.pem >/tmp/t65i.out 2>&1 \
+     && "$TC" verify "$pkit" >/tmp/t65iv.out 2>&1 && grep -q 'VERIFY OK' /tmp/t65iv.out; then
+    ok "PQ secret reinstalled from escrow (pq import) opens the hybrid kit"
+  else no "pq import round-trip failed: $(tail -1 /tmp/t65i.out) $(tail -1 /tmp/t65iv.out)"; fi
+else no "hybrid backup failed: $(tail -3 /tmp/t65.out)"; fi
+# the same box, classic posture: no envelope, still verifies — posture is per-kit, not per-box
+mkdir -p /tmp/tm/staging-classic
+if TIMECRATE_CRYPTO=classic TIMECRATE_STAGING=/tmp/tm/staging-classic TIMECRATE_INCLUDE=/tmp/inc.small TIMECRATE_EXCLUDE=/tmp/exc.small \
+     "$TC" backup --no-upload --force >/tmp/t65c.out 2>&1; then
+  ckit="$(ls /tmp/tm/staging-classic/timecrate-*.tar.zst.gpg 2>/dev/null | head -1)"
+  head -n1 "$ckit" 2>/dev/null | grep -q '^TIMECRATE-PQ1' \
+    && no "classic kit grew a PQ envelope" || ok "classic kit has no PQ envelope"
+  "$TC" verify "$ckit" >/tmp/t65cv.out 2>&1 && grep -q 'VERIFY OK' /tmp/t65cv.out \
+    && ok "classic kit verifies beside hybrid ones" || no "classic verify failed: $(tail -2 /tmp/t65cv.out)"
+else no "classic backup failed: $(tail -3 /tmp/t65c.out)"; fi
+# escrow sheets carry BOTH secrets, as TXT and as PDF
+if "$TC" escrow-doc /tmp/tm/sheet65.txt >/tmp/t65s.out 2>&1 && grep -q 'PQ SECRET KEY' /tmp/tm/sheet65.txt; then
+  ok "escrow TXT carries the PQ secret"
+else no "escrow TXT lacks the PQ secret: $(tail -1 /tmp/t65s.out)"; fi
+if "$TC" escrow-doc --format pdf /tmp/tm/sheet65.pdf >/tmp/t65p.out 2>&1 \
+   && [ "$(head -c 4 /tmp/tm/sheet65.pdf)" = '%PDF' ] \
+   && python3 -c '
+import re, sys, zlib
+d = open("/tmp/tm/sheet65.pdf", "rb").read()
+t = b""
+for m in re.finditer(rb"stream\n(.*?)endstream", d, re.S):
+    try: t += zlib.decompress(m.group(1).strip(b"\n"))
+    except Exception: pass
+s = t.decode("latin-1")
+sys.exit(0 if ("PQ SECRET KEY" in s and "BEGIN PRIVATE KEY" in s) else 1)'; then
+  ok "escrow PDF is a real PDF carrying the PQ secret"
+else no "escrow PDF missing or hollow: $(tail -1 /tmp/t65p.out)"; fi
+# Drive sign-in routes to its own rclone config; other remotes keep the main one
+mkdir -p /tmp/tm/fakebin
+cat > /tmp/tm/fakebin/rclone <<'FAKE'
+#!/bin/sh
+echo "$*" >> /tmp/tm/rclone65.log
+cfg=""; prev=""
+for a in "$@"; do [ "$prev" = "--config" ] && cfg="$a"; prev="$a"; done
+case "$*" in
+  *"config dump"*)
+    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+      case "$cfg" in *drive65*) echo '{"gdrive":{"type":"drive","token":"x"}}';; *) echo '{}';; esac
+    else echo '{}'; fi;;
+  *"config create"*) [ -n "$cfg" ] && { mkdir -p "$(dirname "$cfg")"; echo '[gdrive]' > "$cfg"; }; echo created;;
+esac
+exit 0
+FAKE
+chmod +x /tmp/tm/fakebin/rclone
+rm -f /tmp/tm/rclone65.log /tmp/tm/drive65.conf
+if PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf "$TC" remote connect --provider drive >/tmp/t65d.out 2>&1; then
+  grep -q -- '--config /tmp/tm/drive65.conf config create gdrive drive' /tmp/tm/rclone65.log \
+    && ok "Drive sign-in creates the gdrive remote in the dedicated config" \
+    || no "Drive sign-in used the wrong config: $(cat /tmp/tm/rclone65.log 2>/dev/null)"
+else no "Drive connect failed against the fake: $(tail -2 /tmp/t65d.out)"; fi
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf "$TC" remote browse gdrive:Apollo >/dev/null 2>&1
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf TIMECRATE_RCLONE_CONF=/tmp/tm/main65.conf "$TC" remote browse dropbox:elsewhere >/dev/null 2>&1
+grep -q -- '--config /tmp/tm/drive65.conf lsd gdrive:Apollo' /tmp/tm/rclone65.log \
+  && ok "commands naming gdrive: use the Drive config" || no "gdrive browse did not use the Drive config"
+grep -q -- '--config /tmp/tm/main65.conf lsd dropbox:elsewhere' /tmp/tm/rclone65.log \
+  && ok "other remotes still use the main rclone config" || no "dropbox browse lost the main config"
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_REMOTE=gdrive:Apollo TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf \
+  "$TC" remote status >/tmp/t65st.out 2>&1
+grep -q 'backend      drive (rclone remote "gdrive")' /tmp/t65st.out \
+  && ok "remote status names the Drive backend from its own config" \
+  || no "remote status misreports the Drive backend: $(grep 'backend' /tmp/t65st.out)"
+rm -rf /tmp/tm/fakebin /tmp/tm/staging-pq /tmp/tm/staging-classic
 
 echo "==== RESULT: $PASS PASS / $FAIL FAIL ===="
 [ "$FAIL" -eq 0 ]

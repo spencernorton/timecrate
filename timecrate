@@ -11,7 +11,7 @@
 # Break-glass needs only gpg + zstd + tar (see docs/BREAK-GLASS.md).
 set -euo pipefail
 
-VERSION="3.0.1"
+VERSION="3.1.1"
 SELF="$(basename "$0")"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
@@ -120,6 +120,21 @@ ZSTD_LEVEL="${TIMECRATE_ZSTD_LEVEL:-19}"
 # ~128 MB RAM so recovery works on a small rescue box. --long=31 needed 2 GiB and OOM'd a 2 GB VM.
 ZSTD_LONG="${TIMECRATE_ZSTD_LONG:-27}"
 CIPHER="AES256"
+# Kit encryption posture. classic = today's GPG-only kit (RSA-4096 + AES-256, break-glass with
+# gpg+zstd+tar alone). hybrid = the same signed GPG kit wrapped in a post-quantum envelope:
+# an ML-KEM-1024 encapsulation (OpenSSL) whose shared secret keys a symmetric AES-256 GPG layer
+# around the whole kit, so a harvest-now-decrypt-later attacker who breaks RSA still faces the
+# KEM. Opening a hybrid kit needs BOTH secrets (escrow carries both). Anything else = classic.
+CRYPTO="${TIMECRATE_CRYPTO:-classic}"
+case "$CRYPTO" in hybrid) ;; *) CRYPTO="classic";; esac
+PQ_SECRET="${TIMECRATE_PQ_SECRET:-$CONF_DIR/pq-secret.pem}"   # ML-KEM-1024 secret (PEM, 0600)
+PQ_PUBLIC="${TIMECRATE_PQ_PUBLIC:-$CONF_DIR/pq-public.pem}"   # ML-KEM-1024 public (PEM)
+PQ_HEADER="TIMECRATE-PQ1"
+# Google Drive sign-in (remote connect --provider drive) lives in its OWN rclone config, so a
+# password-encrypted main rclone.conf can neither block it nor be unlocked by it. rc() picks
+# this file whenever a command names the drive remote.
+DRIVE_REMOTE="${TIMECRATE_DRIVE_REMOTE:-gdrive}"
+DRIVE_CONF="${TIMECRATE_DRIVE_CONF:-$CONF_DIR/rclone-drive.conf}"
 LOCKFILE="${TIMECRATE_LOCK:-/run/lock/timecrate.lock}"
 PREFIX="timecrate"
 # Kits written before 3.0.0 carry the previous name. They are the same series: every command that
@@ -218,21 +233,26 @@ rc(){
   # Root only ever opens a file it owns (a private temp copy). Both ends of the user's path — the
   # read and, if the token was refreshed, the write-back — happen AS the user, with the user's own
   # privileges, where there is nothing to escalate.
-  local r=0
-  if [ "$(id -u)" = 0 ] && [ "$TC_USER" != root ] && have runuser && [ -f "$RCLONE_CONF" ]; then
+  local r=0 conf="$RCLONE_CONF" a
+  # Google Drive sign-in keeps its own config (DRIVE_CONF): any argument naming the drive
+  # remote selects it, so a password-encrypted main config can neither block nor be unlocked
+  # by a Drive command. TC_RC_CONF overrides for callers (config dump) that name no remote.
+  for a in "$@"; do case "$a" in "$DRIVE_REMOTE":*) conf="$DRIVE_CONF";; esac; done
+  [ -n "${TC_RC_CONF:-}" ] && conf="$TC_RC_CONF"
+  if [ "$(id -u)" = 0 ] && [ "$TC_USER" != root ] && have runuser && [ -f "$conf" ]; then
     local cfg; cfg="$(mktemp)" || die "cannot create a temporary rclone config"
     chmod 600 "$cfg"
-    runuser -u "$TC_USER" -- cat "$RCLONE_CONF" > "$cfg" 2>/dev/null || true
+    runuser -u "$TC_USER" -- cat "$conf" > "$cfg" 2>/dev/null || true
     local before; before="$(sha256sum < "$cfg" 2>/dev/null || true)"
     rclone --config "$cfg" "$@" || r=$?
     if [ "$(sha256sum < "$cfg" 2>/dev/null || true)" != "$before" ]; then
       # the token was refreshed: give it back by WRITING AS THE USER, never by chowning as root
-      local wberr; wberr="$(runuser -u "$TC_USER" -- sh -c 'cat > "$1"' _ "$RCLONE_CONF" < "$cfg" 2>&1)" \
-        || warn "rclone refreshed its token but writing it back to $RCLONE_CONF as $TC_USER failed (${wberr:-no error text}) — the next run may re-authenticate"
+      local wberr; wberr="$(runuser -u "$TC_USER" -- sh -c 'cat > "$1"' _ "$conf" < "$cfg" 2>&1)" \
+        || warn "rclone refreshed its token but writing it back to $conf as $TC_USER failed (${wberr:-no error text}) — the next run may re-authenticate"
     fi
     rm -f "$cfg"
   else
-    rclone --config "$RCLONE_CONF" "$@" || r=$?
+    rclone --config "$conf" "$@" || r=$?
   fi
   return $r
 }
@@ -359,6 +379,67 @@ gpg_tc(){
   GNUPGHOME="$GNUPGHOME_TC" gpg --batch --no-tty ${perm:+"$perm"} "$@"
 }
 
+# ---- post-quantum envelope (hybrid kits) ---------------------------------------------------
+# A hybrid kit is the ordinary signed GPG kit with one envelope around it: line 1 is
+# "TIMECRATE-PQ1 ML-KEM-1024 <pubkey-sha256> <base64 KEM ciphertext>", the rest is the GPG kit
+# symmetrically encrypted (AES-256) with the KEM shared secret. Only openssl + gpg are needed,
+# both already on every box this tool targets; no new runtime dependency.
+pq_supported(){ have openssl && openssl list -kem-algorithms 2>/dev/null | grep -q 'ML-KEM-1024'; }
+pq_fpr(){ [ -f "$PQ_PUBLIC" ] || return 0; openssl pkey -pubin -in "$PQ_PUBLIC" -outform DER 2>/dev/null | sha256sum | awk '{print $1}'; }
+kit_is_pq(){ [ -f "$1" ] && [ "$(head -n1 -- "$1" 2>/dev/null | cut -d' ' -f1)" = "$PQ_HEADER" ]; }
+
+# Idempotent ML-KEM-1024 keypair. Returns non-zero (never dies) so `init` stays usable for
+# classic kits on a box whose openssl predates ML-KEM.
+pq_init(){
+  if [ -s "$PQ_SECRET" ] && [ -s "$PQ_PUBLIC" ]; then
+    log "PQ key already configured (ML-KEM-1024, fingerprint $(pq_fpr))"; return 0
+  fi
+  pq_supported || { warn "this openssl has no ML-KEM-1024 (need OpenSSL 3.5+) — PQ key not created"; return 1; }
+  umask 077; mkdir -p "$CONF_DIR"
+  openssl genpkey -algorithm ML-KEM-1024 -out "$PQ_SECRET" 2>/dev/null \
+    && openssl pkey -in "$PQ_SECRET" -pubout -out "$PQ_PUBLIC" 2>/dev/null \
+    || { warn "PQ key generation failed (openssl)"; return 1; }
+  chmod 600 "$PQ_SECRET"; chmod 644 "$PQ_PUBLIC"
+  log "PQ key generated (ML-KEM-1024, fingerprint $(pq_fpr))"
+  log "  secret $PQ_SECRET is part of your escrow — '$SELF escrow-doc' carries it"
+}
+
+# Wrap finished GPG kit $1 in the PQ envelope, replacing it.
+pq_wrap(){
+  local kit="$1" t
+  [ -f "$PQ_PUBLIC" ] || die "TIMECRATE_CRYPTO=hybrid but no PQ public key at $PQ_PUBLIC — run '$SELF pq init' first"
+  pq_supported || die "TIMECRATE_CRYPTO=hybrid but this openssl has no ML-KEM-1024 (need OpenSSL 3.5+)"
+  t="$(mktemp -d)"; chmod 700 "$t"
+  openssl pkeyutl -encap -pubin -inkey "$PQ_PUBLIC" -out "$t/ct" -secret "$t/ss" 2>/dev/null \
+    || { rm -rf "$t"; die "ML-KEM encapsulation failed (openssl)"; }
+  od -An -tx1 -v "$t/ss" | tr -d ' \n' > "$t/pass"; rm -f "$t/ss"; chmod 600 "$t/pass"
+  { printf '%s ML-KEM-1024 %s %s\n' "$PQ_HEADER" "$(pq_fpr)" "$(base64 -w0 "$t/ct")"
+    gpg --batch --yes --pinentry-mode loopback --passphrase-file "$t/pass" \
+        --cipher-algo AES256 --s2k-cipher-algo AES256 -c -o - "$kit"
+  } > "$kit.pqpart" || { rm -rf "$t"; die "PQ envelope encryption failed (gpg)"; }
+  rm -rf "$t"; mv "$kit.pqpart" "$kit"
+}
+
+# Unwrap hybrid kit $1 into the inner GPG kit $2.
+pq_unwrap(){
+  local kit="$1" out="$2" hdr alg fpr t rc1 rc2
+  hdr="$(head -n1 -- "$kit")"
+  alg="$(printf '%s' "$hdr" | cut -d' ' -f2)"; fpr="$(printf '%s' "$hdr" | cut -d' ' -f3)"
+  [ "$alg" = "ML-KEM-1024" ] || die "kit carries an unsupported PQ envelope ('$alg') — upgrade timecrate to read it"
+  [ -f "$PQ_SECRET" ] || die "kit is PQ-wrapped (ML-KEM-1024, key ${fpr:-unknown}) but no PQ secret key at $PQ_SECRET — restore it from your escrow sheet ('$SELF escrow-doc' prints it), then retry"
+  [ "$(pq_fpr)" = "$fpr" ] || die "kit was wrapped for PQ key $fpr but this box holds $(pq_fpr) — the wrong PQ secret is installed; restore the escrowed one, then retry"
+  pq_supported || die "kit is PQ-wrapped but this openssl has no ML-KEM-1024 (need OpenSSL 3.5+) — unwrap it on a newer box (BREAK-GLASS.md)"
+  t="$(mktemp -d)"; chmod 700 "$t"
+  printf '%s' "$hdr" | cut -d' ' -f4 | base64 -d > "$t/ct" 2>/dev/null \
+    || { rm -rf "$t"; die "kit's PQ header is corrupt (KEM ciphertext does not decode)"; }
+  openssl pkeyutl -decap -inkey "$PQ_SECRET" -in "$t/ct" -secret "$t/ss" 2>/dev/null \
+    || { rm -rf "$t"; die "PQ decapsulation FAILED for $kit (wrong PQ secret / corrupt kit)"; }
+  od -An -tx1 -v "$t/ss" | tr -d ' \n' > "$t/pass"; rm -f "$t/ss"; chmod 600 "$t/pass"
+  tail -n +2 -- "$kit" | gpg --batch --yes --pinentry-mode loopback --passphrase-file "$t/pass" -o "$out" -d 2>/dev/null
+  local -a rcs=("${PIPESTATUS[@]}"); rc1="${rcs[0]:-9}"; rc2="${rcs[1]:-9}"; rm -rf "$t"
+  [ "$rc1" = 0 ] && [ "$rc2" = 0 ] || die "PQ envelope decrypt FAILED for $kit (wrong PQ secret / corrupt kit)"
+}
+
 # Decrypt $1 into FILE $2 and enforce the signature policy BEFORE anything extracts.
 # $3=1 allows an unsigned kit (the pre-v1.3.0 transition hatch — remove ~2026-08-06).
 #
@@ -375,6 +456,14 @@ decrypt_verified(){
   # the hatch was to remove the ways an unsigned archive gets extracted, not to make it
   # impossible to tell someone WHY theirs will not.
   local kit="$1" out="$2" mode="${3:-}" st fpr expected
+  # Hybrid kits unwrap to a sibling temp first; the GPG/signature logic below is unchanged.
+  # Placed beside $out (disk-backed at every call site) and removed once decryption lands.
+  local pqtmp=""
+  if kit_is_pq "$kit"; then
+    pqtmp="$(dirname "$out")/.pq-inner.$$"
+    pq_unwrap "$kit" "$pqtmp"
+    kit="$pqtmp"
+  fi
   st="$(mktemp)"
   local -a genv=()
   # use the tool's keyring only when it can actually DECRYPT (an encrypt-capable secret, 'e'/'E' in
@@ -385,8 +474,21 @@ decrypt_verified(){
        | awk -F: '($1=="sec"||$1=="ssb") && tolower($12) ~ /e/ {f=1} END{exit !f}'; then
     genv=(env "GNUPGHOME=$GNUPGHOME_TC")
   fi
+  # Root decrypting against the USER's keyring must work on a copy, never the live keyring:
+  # gpg-agent stores secret material per keygrip on first use, so a root restore writes part
+  # of the user's secret key root-owned (mode 600) into their keyring, and every later
+  # unprivileged decrypt fails "Permission denied". Same rule as rc(): root only ever opens
+  # a file it owns. The copy is small (keys, not kits) and dies with the call.
+  local keycopy=""
+  if [ "$(id -u)" = 0 ] && [ "${#genv[@]}" -gt 0 ]; then
+    keycopy="$(mktemp -d)"; chmod 700 "$keycopy"
+    cp -a "$GNUPGHOME_TC/." "$keycopy/" 2>/dev/null || true
+    genv=(env "GNUPGHOME=$keycopy")
+  fi
   local grc=0 gperm; gperm="$(gpg_perm_flag)"
   "${genv[@]}" gpg --batch --no-tty ${gperm:+"$gperm"} --yes --status-file "$st" -o "$out" -d "$kit" || grc=$?
+  [ -z "$keycopy" ] || rm -rf "$keycopy"
+  [ -z "$pqtmp" ] || rm -f "$pqtmp"
   if [ "$grc" != 0 ] && ! grep -q '^\[GNUPG:\] DECRYPTION_OKAY' "$st"; then
     # nonzero AND decryption did not complete = a real decrypt failure. (gpg also exits nonzero
     # when decryption SUCCEEDED but the signer's public key is absent — that case falls through
@@ -566,6 +668,7 @@ write_status(){
        TC_JSON_INC="$INCLUDE_FILE" TC_JSON_EXC="$EXCLUDE_FILE" TC_JSON_USER="$TC_USER" \
        TC_JSON_GITWATCH="$GIT_WATCH" TC_JSON_PAUSED="$(pause_active || true)" \
        TC_JSON_KEEP="$KEEP" TC_JSON_KEEPM="$KEEP_MONTHLY" TC_JSON_KEEPY="$KEEP_YEARLY" \
+       TC_JSON_CRYPTO="$CRYPTO" TC_JSON_PQFPR="$(pq_fpr)" \
        TC_JSON_MAXMB="$MAX_MB" TC_JSON_MINMB="$MIN_MB" TC_JSON_ZL="$ZSTD_LEVEL" \
        python3 -c '
 import json, os
@@ -576,6 +679,7 @@ def num(v, d=0):
 print(json.dumps({
   "version": e("TC_JSON_VERSION",""), "remote": e("TC_JSON_REMOTE",""), "remote2": e("TC_JSON_REMOTE2",""),
   "cipher": "AES-256 (AES-NI)", "keytype": "RSA-4096", "key_fpr": e("TC_JSON_FPR",""),
+  "crypto": e("TC_JSON_CRYPTO","classic"), "pq_fpr": e("TC_JSON_PQFPR",""),
   "escrow_confirmed": e("TC_JSON_ESCROW") == "true",
   "last_backup": e("TC_JSON_LAST",""), "drill_last": e("TC_JSON_DRILL",""),
   # strings, not ints: "" is "not recorded", and a number here would have to invent a value for it
@@ -695,6 +799,9 @@ KEYSPEC
     log "PUBLIC key exported to $SIGNING_PUB — add it to the escrow sheet ('$SELF escrow-doc')"
     log "  and keep a copy beside the escrowed secret key. It is public: no secret escrow needed."
   fi
+  # PQ keypair (ML-KEM-1024) — idempotent like the signing key. Failure never blocks a classic
+  # setup: hybrid kits simply stay unavailable until `pq init` succeeds.
+  pq_init || warn "PQ key not created — hybrid kits stay unavailable until '$SELF pq init' succeeds"
   cat <<EOF
 
   ┌─ ESCROW THE DECRYPTION KEY (do this NOW) ────────────────────────────────┐
@@ -964,12 +1071,16 @@ cmd_backup(){
   [ "${rc[1]:-9}" = 0 ]   || die "zstd failed (exit ${rc[1]})"
   [ "${rc[2]:-9}" = 0 ]   || die "gpg failed (exit ${rc[2]})"
   mv "$kit.part" "$kit"
+  if [ "$CRYPTO" = hybrid ]; then
+    log "wrapping kit in the post-quantum envelope (ML-KEM-1024 + AES-256)…"
+    pq_wrap "$kit"
+  fi
 
   sha="$kit.sha256"; ( cd "$STAGING_ROOT" && sha256sum "$(basename "$kit")" ) > "$sha"
   meta="$STAGING_ROOT/${PREFIX}-${ts}.meta.json"
   local kbytes; kbytes="$(stat -c %s "$kit")"
-  printf '{"prefix":"%s","ts":"%s","host":"%s","version":"%s","cipher":"%s","zstd_level":%s,"zstd_long":%s,"bytes":%s,"sha256":"%s"}\n' \
-    "$PREFIX" "$ts" "$(hostname)" "$VERSION" "$CIPHER" "$ZSTD_LEVEL" "$ZSTD_LONG" \
+  printf '{"prefix":"%s","ts":"%s","host":"%s","version":"%s","cipher":"%s","crypto":"%s","zstd_level":%s,"zstd_long":%s,"bytes":%s,"sha256":"%s"}\n' \
+    "$PREFIX" "$ts" "$(hostname)" "$VERSION" "$CIPHER" "$CRYPTO" "$ZSTD_LEVEL" "$ZSTD_LONG" \
     "$kbytes" "$(cut -d' ' -f1 "$sha")" > "$meta"
   # the kit is now COMPLETE — from here on it must survive any failure (a failed upload must
   # never let the EXIT trap delete the only copy that exists anywhere)
@@ -1602,7 +1713,7 @@ cmd_config(){
   echo
   echo "Effective settings:"
   local k
-  for k in TC_USER REMOTE REMOTE2 INCLUDE_FILE EXCLUDE_FILE CONF_DIR STATE_DIR STAGING_ROOT \
+  for k in TC_USER REMOTE REMOTE2 CRYPTO DRIVE_REMOTE DRIVE_CONF INCLUDE_FILE EXCLUDE_FILE CONF_DIR STATE_DIR STAGING_ROOT \
            RCLONE_CONF KEEP KEEP_MONTHLY KEEP_YEARLY MIN_MB MAX_MB ZSTD_LEVEL ZSTD_LONG \
            GIT_WATCH ESCROW_SSH ESCROW_KEY_CMD ALERT_CMD TIMESHIFT_GUARD LOCKFILE; do
     # TC_USER carries its provenance, because it is the one setting that is silently *derived*
@@ -1647,14 +1758,16 @@ timecrate $VERSION — lean encrypted off-site disaster-recovery backup
                              Always expires, only stops backup — the drill keeps running
        $SELF demo            self-test the crypto+fidelity pipeline (no root, throwaway keyring)
        $SELF break-glass <file> [target]   raw tool-independent recovery (BREAK-GLASS.md, /usr/share/doc/timecrate)
-       $SELF escrow-doc [outfile]  write a printable recovery sheet (+QR) of the secret key
+       $SELF escrow-doc [--format txt|pdf] [outfile]  write a printable recovery sheet (+QR) of the secret key
        $SELF recovery-drill [key] [ts]   PROVE an escrowed key alone decrypts a real backup
   sudo $SELF escrow-confirm       mark the key as safely escrowed (clears the backup warning)
 
 Remote — where the backups go (none of these need root):
        $SELF remote status [--json]   path, backend, account, token expiry, reachability
-       $SELF remote connect [--provider dropbox] [--reauthorize]
+       $SELF remote connect [--provider dropbox|drive] [--reauthorize]
                              run the provider's authorisation and store it in rclone's config
+                             (drive = Google Drive sign-in, in its own rclone config;
+                             then pick the folder: remote browse gdrive: + remote set-path)
        $SELF remote test     prove it lists AND writes; names the reason when it does not
        $SELF remote browse [<remote:path>] [--json]   one level of folders, for picking one
        $SELF remote mkdir <remote:path>
@@ -1685,6 +1798,12 @@ Keys — recovering a machine starts here (none of these need root):
                              --deep decrypts and authenticates the whole kit)
        $SELF export-key [--out <file>]   re-escrow the secret key; refuses to write it anywhere
                              that would end up inside a backup
+       $SELF pq init          generate the ML-KEM-1024 post-quantum keypair (escrowed by
+                             escrow-doc alongside the GPG secret; also run by init)
+       $SELF pq import <file> [--replace]   install a PQ secret key from an escrow sheet
+       $SELF pq status [--json]   PQ key presence, fingerprint and kit posture
+                             (TIMECRATE_CRYPTO=classic|hybrid; hybrid wraps each new kit
+                             in the ML-KEM envelope, old kits stay readable)
 
 Configuration, strongest source first:
   environment                               TIMECRATE_REMOTE=… $SELF list
@@ -1729,6 +1848,16 @@ Tool-independent recovery (raw gpg + zstd + tar — no timecrate required):
   zstd -dc --long=$ZSTD_LONG < kit.tar.zst | sudo tar --numeric-owner --acls --xattrs -xpf - -C '$target'
 Running the same steps now (verify-before-extract) →
 EOF
+  if kit_is_pq "$kit"; then
+    cat <<EOF
+This kit is PQ-wrapped (TIMECRATE-PQ1 header). Unwrap it FIRST, with the PQ secret key
+from the escrow sheet and openssl 3.5+, then run the steps above on inner.gpg:
+  head -n1 '$kit' | cut -d' ' -f4 | base64 -d > kem.ct
+  openssl pkeyutl -decap -inkey pq-secret.pem -in kem.ct -secret kem.ss
+  od -An -tx1 -v kem.ss | tr -d ' \\n' > kem.pass
+  tail -n +2 '$kit' | gpg --batch --pinentry-mode loopback --passphrase-file kem.pass -d -o inner.gpg
+EOF
+  fi
   # temp INSIDE the target dir (disk-backed) — a 2 GB rescue box's /tmp tmpfs can't hold a kit
   local dec; dec="$(mktemp "$target/.timecrate-dec.XXXXXX")"; TC_TMP="$dec"; trap 'rm -f -- "$TC_TMP"' EXIT
   # Report, do not gate: this command exists to be the path that still works when everything else
@@ -1745,12 +1874,69 @@ EOF
   fi
 }
 
+# Minimal text-to-PDF (stdlib only): the escrow sheet as printable Courier pages.
+escrow_pdf_write(){ # $1 = sheet text, $2 = pdf out
+  python3 - "$1" "$2" <<'PYEOF'
+import sys, zlib
+lines = []
+for raw in open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines():
+    while len(raw) > 92:
+        lines.append(raw[:92]); raw = raw[92:]
+    lines.append(raw)
+per = 54
+pages = [lines[i:i + per] for i in range(0, len(lines), per)] or [[]]
+def esc(s):
+    return s.encode("latin-1", "replace").decode("latin-1").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+objs = {}
+objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+kids = []
+contents = []
+for i, page in enumerate(pages):
+    cnum, pnum = 4 + 2 * i, 5 + 2 * i
+    kids.append(b"%d 0 R" % pnum)
+    text = ["BT /F1 7.5 Tf 10 TL 36 756 Td"]
+    for ln in page:
+        text.append("(%s) Tj T*" % esc(ln))
+    text.append("ET")
+    raw = "\n".join(text).encode("latin-1", "replace")
+    objs[cnum] = b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(zlib.compress(raw)) + zlib.compress(raw) + b"\nendstream"
+    objs[pnum] = ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                  "/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % cnum).encode()
+objs[2] = b"<< /Type /Pages /Kids [" + b" ".join(kids) + b"] /Count %d >>" % len(pages)
+objs[3] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>"
+out = bytearray(b"%PDF-1.4\n")
+offsets = {}
+for num in sorted(objs):
+    offsets[num] = len(out)
+    out += b"%d 0 obj\n" % num + objs[num] + b"\nendobj\n"
+xref = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (max(objs) + 1)
+for num in range(1, max(objs) + 1):
+    out += b"%010d 00000 n \n" % offsets[num]
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (max(objs) + 1, xref)
+open(sys.argv[2], "wb").write(bytes(out))
+PYEOF
+}
+
 cmd_escrow_doc(){
-  local out="${1:-$CONF_DIR/timecrate-ESCROW-DOC.txt}"
+  local out="" fmt=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --format) fmt="${2:-}"; shift;;
+    --format=*) fmt="${1#--format=}";;
+    --*) die "unknown escrow-doc flag: $1";;
+    *) out="$1";;
+  esac; shift; done
+  out="${out:-$CONF_DIR/timecrate-ESCROW-DOC.txt}"
+  [ -n "$fmt" ] || case "$out" in *.pdf) fmt=pdf;; *) fmt=txt;; esac
+  case "$fmt" in txt|pdf) ;; *) die "escrow-doc --format must be txt or pdf";; esac
+  [ "$fmt" = pdf ] && case "$out" in *.pdf) ;; *) out="${out%.*}.pdf";; esac
   [ -f "$SECRET_ESCROW" ] || die "no secret key at $SECRET_ESCROW — run '$SELF init' first (or it was hardened away)"
   # the sheet's recovery steps reference the signing key — a sheet without it would instruct
   # a verification that cannot be performed
   [ -f "$SIGNING_PUB" ] || die "signing public key missing ($SIGNING_PUB) — run '$SELF init' first (v1.3.0 sheets must carry it)"
+  if [ "$CRYPTO" = hybrid ] && [ ! -f "$PQ_SECRET" ]; then
+    die "kit posture is hybrid but no PQ secret at $PQ_SECRET — this sheet could not open a hybrid kit. Run '$SELF pq init', then re-issue the sheet."
+  fi
   # the sheet CONTAINS the secret key — writing it anywhere the backup includes would ship the
   # key inside the very kit it decrypts
   local rp inc
@@ -1763,6 +1949,7 @@ cmd_escrow_doc(){
     done < <(build_include)
   fi
   local fpr; fpr="$(head -1 "$RECIPIENTS_FILE")"
+  local sheet; sheet="$(mktemp)"; chmod 600 "$sheet"
   umask 077
   {
     echo "============ TIMECRATE — KEY ESCROW  (PRINT THIS, STORE OFFLINE) ============"
@@ -1784,6 +1971,15 @@ cmd_escrow_doc(){
     echo "    | sudo tar --numeric-owner --acls --xattrs -xpf - -C /restore"
     echo "  (kits made before 3.0.0 are named timemachine-<ts>; the steps are the same)"
     echo "  (full steps: RESTORE.md and BREAK-GLASS.md, https://github.com/spencercnorton/timecrate)"
+    if [ -f "$PQ_SECRET" ]; then
+      echo "  PQ-wrapped kits (first line starts with TIMECRATE-PQ1) unwrap BEFORE the steps above,"
+      echo "  with the PQ secret key printed below and openssl 3.5+:"
+      echo "    head -n1 KIT | cut -d' ' -f4 | base64 -d > kem.ct"
+      echo "    openssl pkeyutl -decap -inkey pq-secret.pem -in kem.ct -secret kem.ss"
+      echo "    od -An -tx1 -v kem.ss | tr -d ' \\n' > kem.pass"
+      echo "    tail -n +2 KIT | gpg --batch --pinentry-mode loopback --passphrase-file kem.pass -d -o inner.gpg"
+      echo "    then run the gpg/zstd/tar steps above on inner.gpg — it is the signed kit."
+    fi
     echo
     echo "--- GPG SECRET KEY (ASCII-armored, decryption) ---"
     cat "$SECRET_ESCROW"
@@ -1792,14 +1988,29 @@ cmd_escrow_doc(){
       echo "--- SIGNING PUBLIC KEY (authentication; fpr: $(cat "$SIGNING_FILE" 2>/dev/null || echo '?')) ---"
       cat "$SIGNING_PUB"
     fi
-  } > "$out"
+    if [ -f "$PQ_SECRET" ]; then
+      echo
+      echo "--- PQ SECRET KEY (ML-KEM-1024, PEM — opens the PQ envelope of hybrid kits) ---"
+      echo "Fingerprint (SHA-256 of the public key): $(pq_fpr)"
+      cat "$PQ_SECRET"
+      echo
+      echo "--- PQ PUBLIC KEY (ML-KEM-1024, PEM) ---"
+      cat "$PQ_PUBLIC"
+    fi
+  } > "$sheet"
+  if [ "$fmt" = pdf ]; then
+    escrow_pdf_write "$sheet" "$out" || { rm -f "$sheet"; die "PDF generation failed (python3)"; }
+    rm -f "$sheet"
+  else
+    mv "$sheet" "$out"
+  fi
   chmod 600 "$out"
-  log "escrow document: $out"
-  if have qrencode; then
+  log "escrow document ($fmt): $out"
+  if [ "$fmt" = txt ] && have qrencode; then
     if qrencode -8 -o "${out%.txt}.qr.png" < "$SECRET_ESCROW" 2>/dev/null; then
       log "QR of the key: ${out%.txt}.qr.png (scan to recover the key with no digital copy)"
     else warn "key too large for a single QR — the printed text is authoritative"; fi
-  else warn "install qrencode (apt install qrencode) for a scannable paper QR of the key"; fi
+  elif [ "$fmt" = txt ]; then warn "install qrencode (apt install qrencode) for a scannable paper QR of the key"; fi
   echo; echo ">> PRINT $out and store it offline. This is your last-resort recovery key. <<"
 }
 
@@ -1843,8 +2054,12 @@ cmd_recovery_drill(){
   [ -s "$kit" ] || die "fetched kit is empty ($kit) — check remote path $REMOTE"
   log "decrypting with ONLY the escrowed key + verifying signature + archive listing…"
   local derr dec st; derr="$(mktemp)"; dec="$t/kit.tar.zst"; st="$t/gpg-status"
+  # hybrid kits unwrap through the same seam as every other reader (pq_unwrap dies loud
+  # when the PQ secret is absent — the drill must not pretend it proved anything then)
+  local inner="$kit"
+  if kit_is_pq "$kit"; then inner="$t/kit-inner.gpg"; pq_unwrap "$kit" "$inner"; fi
   set +e
-  gpg --batch --no-tty --yes --status-file "$st" -o "$dec" -d "$kit" 2>"$derr"
+  gpg --batch --no-tty --yes --status-file "$st" -o "$dec" -d "$inner" 2>"$derr"
   local grc=$?
   zstd -dc --long=$ZSTD_LONG < "$dec" 2>/dev/null | tar -tf - >/dev/null 2>&1
   local -a prc=("${PIPESTATUS[@]}")
@@ -1898,7 +2113,14 @@ cmd_recovery_drill(){
     if [ -s "$vf.sha256" ] && [ "$(sha256sum "$vf" | cut -d' ' -f1)" != "$(awk '{print $1}' "$vf.sha256")" ]; then
       badkits="${badkits:+$badkits, }$vk(sha256)"; rm -f "$vf" "$vf.sha256"; continue
     fi
-    gpg --batch --no-tty --yes --status-file "$vst" -o /dev/null -d "$vf" 2>/dev/null || true
+    local vuse="$vf"
+    if kit_is_pq "$vf"; then
+      vuse="$t/allv-inner.gpg"
+      ( pq_unwrap "$vf" "$vuse" ) 2>/dev/null \
+        || { badkits="${badkits:+$badkits, }$vk(pq-unwrap)"; rm -f "$vf" "$vf.sha256"; continue; }
+    fi
+    gpg --batch --no-tty --yes --status-file "$vst" -o /dev/null -d "$vuse" 2>/dev/null || true
+    [ "$vuse" = "$vf" ] || rm -f "$vuse"
     if grep -q '^\[GNUPG:\] VALIDSIG ' "$vst"; then
       if [ -z "$expected" ] || grep -q "^\[GNUPG:\] VALIDSIG $expected" "$vst"; then nver=$((nver+1))
       else badkits="${badkits:+$badkits, }$vk(wrong-signer)"; fi
@@ -2334,7 +2556,7 @@ remote_name(){ printf '%s' "${REMOTE%%:*}"; }
 remote_conf_facts(){
   local name; name="$(remote_name)"
   [ -n "$name" ] || return 0
-  rc config dump 2>/dev/null | TC_RNAME="$name" python3 -c '
+  rc config dump 2>/dev/null | TC_RNAME="${TC_RNAME:-$name}" python3 -c '
 import json, os, sys
 try:
     conf = json.load(sys.stdin)
@@ -2390,6 +2612,9 @@ remote_status(){
   local about=""
   [ -n "$REMOTE" ] && { about="$(rc about "${REMOTE%%:*}:" --json 2>/dev/null)" || about=""; }
 
+  local dfacts dacct=""
+  dfacts="$(drive_conf_facts)"; [ -n "$dfacts" ] || dfacts='{}'
+  dacct="$(rc config userinfo "$DRIVE_REMOTE:" 2>/dev/null | awk -F': *' '/[Ee]mail/{print $2; exit}' || true)"
   if [ "$json" = 1 ]; then
     # NOT "${facts:-{}}": bash ends the expansion at the first } inside the default, so that
     # appends a stray brace and the JSON silently fails to parse -- which showed up as the text
@@ -2397,12 +2622,15 @@ remote_status(){
     [ -n "$facts" ] || facts='{}'
     TC_R_REMOTE="$REMOTE" TC_R_NAME="$name" TC_R_FACTS="$facts" TC_R_REACH="$reachable" \
     TC_R_KITS="$kits" TC_R_LAST="$last" TC_R_ACCT="$acct" TC_R_CONF="$RCLONE_CONF" \
-    TC_R_ABOUT="$about" \
+    TC_R_ABOUT="$about" TC_R_DFACTS="$dfacts" TC_R_DNAME="$DRIVE_REMOTE" TC_R_DCONF="$DRIVE_CONF" \
+    TC_R_DACCT="$dacct" \
     python3 -c '
 import json, os
 e = os.environ.get
 try: facts = json.loads(e("TC_R_FACTS") or "{}")
 except Exception: facts = {}
+try: dfacts = json.loads(e("TC_R_DFACTS") or "{}")
+except Exception: dfacts = {}
 # a backend that cannot answer `about` is not a backend at quota zero
 quota = {"remote_quota_used": "", "remote_quota_total": ""}
 try:
@@ -2419,6 +2647,9 @@ print(json.dumps({
   # reachable is a fact about right now; "" kits means we could not ask, never zero
   "reachable": e("TC_R_REACH") == "true", "kits": e("TC_R_KITS",""),
   "last_backup": e("TC_R_LAST",""), "rclone_config": e("TC_R_CONF",""),
+  "drive_remote": e("TC_R_DNAME",""), "drive_config": e("TC_R_DCONF",""),
+  "drive_configured": bool(dfacts.get("type")), "drive_signed_in": bool(dfacts.get("has_token")),
+  "drive_account": e("TC_R_DACCT",""),
   **quota,
 }))'
     return 0
@@ -2434,6 +2665,14 @@ print(json.dumps({
   local rtype; rtype="$(printf '%s' "${facts:-}" | python3 -c 'import json,sys
 try: print((json.load(sys.stdin) or {}).get("type",""))
 except Exception: print("")' 2>/dev/null || true)"
+  # the Drive remote lives in its own config: a status that only reads the main one
+  # reports NOT CONFIGURED for a signed-in, reachable Drive — the split-brain this
+  # command exists to end. Consult the drive facts when the path names that remote.
+  if [ -z "$rtype" ] && [ "$name" = "$DRIVE_REMOTE" ]; then
+    rtype="$(printf '%s' "${dfacts:-}" | python3 -c 'import json,sys
+try: print((json.load(sys.stdin) or {}).get("type",""))
+except Exception: print("")' 2>/dev/null || true)"
+  fi
   if [ -n "$rtype" ]; then
     printf '  backend      %s (rclone remote "%s")\n' "$rtype" "$name"
   else
@@ -2466,8 +2705,15 @@ except Exception:
     pass' 2>/dev/null || true
   fi
   [ -n "$last" ] && printf '  last backup  %s\n' "$last"
-  printf '  config       %s\n' "$RCLONE_CONF"
+  if [ "$name" = "$DRIVE_REMOTE" ]; then
+    printf '  config       %s (Drive sign-in config)\n' "$DRIVE_CONF"
+  else
+    printf '  config       %s\n' "$RCLONE_CONF"
+  fi
 }
+
+# Whitelisted facts about the DRIVE remote, from its own config (same parser, other file).
+drive_conf_facts(){ TC_RC_CONF="$DRIVE_CONF" TC_RNAME="$DRIVE_REMOTE" remote_conf_facts; }
 
 remote_connect(){
   local provider=dropbox force=0
@@ -2478,6 +2724,30 @@ remote_connect(){
   esac; shift; done
   have rclone || die "rclone is not installed"
   local -a headless=()
+  # Google Drive signs in as its own remote in its own config, independent of whatever
+  # TIMECRATE_REMOTE currently names — that independence is the point of the feature.
+  if [ "$provider" = drive ]; then
+    local name="$DRIVE_REMOTE" existing
+    existing="$(drive_conf_facts)"
+    if printf '%s' "$existing" | grep -q '"type": *"[^"]'; then
+      [ "$force" = 1 ] || die "an rclone remote called '$name' already exists. Pass --reauthorize to replace its credentials (the backups themselves are untouched)."
+    fi
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+      log "no graphical session here, so the browser step has to happen elsewhere:"
+      log "  1. on a machine with a browser:  rclone authorize \"drive\""
+      log "  2. paste the token it prints when this command asks for it"
+      headless=(config_is_local=false)
+    fi
+    umask 077; mkdir -p "$CONF_DIR"
+    log "starting the Google Drive authorisation for rclone remote '$name' (a browser opens)…"
+    TC_RC_CONF="$DRIVE_CONF" rc config create "$name" drive "${headless[@]}" \
+      || die "rclone could not create the Drive remote — sign-in was not completed"
+    [ -f "$DRIVE_CONF" ] && chmod 600 "$DRIVE_CONF" 2>/dev/null || true
+    rc lsf "$name:" >/dev/null 2>&1 || die "signed in, but Drive does not answer yet — check the account and run '$SELF remote status'"
+    log "signed in to Google Drive as remote '$name'."
+    log "  pick the backup folder:  $SELF remote browse $name:   then   $SELF remote set-path $name:<folder>"
+    return 0
+  fi
   local name; name="$(remote_name)"
   [ -n "$name" ] || die "no remote configured to connect — set TIMECRATE_REMOTE first, e.g. dropbox:Backup/TIMECRATE"
 
@@ -2747,7 +3017,8 @@ cmd_keys(){
     TC_K_EFPR="$efpr" TC_K_SFPR="$sfpr" TC_K_ESEC="$esec" TC_K_SSEC="$ssec" TC_K_SPUB="$spub" \
     TC_K_ESTATE="$ESC_STATE" TC_K_EWHO="$ESC_FPR" TC_K_EWHEN="$ESC_WHEN" \
     TC_K_ESCROW_FILE="$SECRET_ESCROW" TC_K_READABLE="$readable" TC_K_OWNER="$owner" \
-    TC_K_CONFDIR="${blocker:-$CONF_DIR}" \
+    TC_K_CONFDIR="${blocker:-$CONF_DIR}" TC_K_PQFPR="$(pq_fpr)" TC_K_PQSEC="$PQ_SECRET" \
+    TC_K_PQPUB="$PQ_PUBLIC" TC_K_CRYPTO="$CRYPTO" \
     python3 -c '
 import json, os
 e = os.environ.get
@@ -2762,6 +3033,8 @@ print(json.dumps({
   # would offer to generate a key on a machine that already has one
   "keyring_readable": e("TC_K_READABLE") != "false",
   "keyring_owner": e("TC_K_OWNER",""), "config_dir": e("TC_K_CONFDIR",""),
+  "pq_fpr": e("TC_K_PQFPR",""), "pq_secret_present": os.path.exists(e("TC_K_PQSEC","")),
+  "pq_public_present": os.path.exists(e("TC_K_PQPUB","")), "crypto": e("TC_K_CRYPTO","classic"),
 }))'
     return 0
   fi
@@ -2793,6 +3066,12 @@ print(json.dumps({
       "$([ "$spub" = true ] && echo present || echo MISSING)"
   else
     printf '  signing      none — kits from this box would be unsigned (pre-v1.3.0 behaviour)\n'
+  fi
+  if [ -s "$PQ_PUBLIC" ]; then
+    printf '  post-quantum %s  (ML-KEM-1024, secret %s; kit posture: %s)\n' "$(pq_fpr)" \
+      "$([ -f "$PQ_SECRET" ] && echo present || echo absent)" "$CRYPTO"
+  else
+    printf '  post-quantum none — kits use the classic GPG envelope (posture: %s). Add one: %s pq init\n' "$CRYPTO" "$SELF"
   fi
   case "$ESC_STATE" in
     none)      printf '  escrow       NOT CONFIRMED — if the secret key is lost these backups are unrecoverable\n';;
@@ -2879,6 +3158,10 @@ cmd_import_key(){
   fi
 
   umask 077; mkdir -p "$CONF_DIR" "$GNUPGHOME_TC" "$STATE_DIR"; chmod 700 "$GNUPGHOME_TC"
+  # an agent started against this homedir BEFORE the wipe (the in-place reinstall drill)
+  # serves the old keyring from cache; kill it so the import below is read fresh — the same
+  # reason the recovery drill kills the agent after importing. Harmless when none is running.
+  GNUPGHOME="$GNUPGHOME_TC" gpgconf --kill gpg-agent >/dev/null 2>&1 || true
   gpg_tc --import "$key" >/dev/null 2>&1 || die "import into $GNUPGHOME_TC failed"
   # --replace ADDS: the previous secret stays in the keyring on purpose, or every kit encrypted
   # to it before today becomes unreadable the moment this command runs.
@@ -2997,6 +3280,61 @@ cmd_export_key(){
   fi
 }
 
+cmd_pq(){
+  local sub="${1:-status}"; [ $# -gt 0 ] && shift
+  case "$sub" in
+    init) pq_init;;
+    import)
+      local f="" replace=0 a
+      for a in "$@"; do case "$a" in
+        --replace) replace=1;;
+        --*) die "unknown pq import flag: $a";;
+        *) f="$a";;
+      esac; done
+      [ -n "$f" ] && [ -f "$f" ] || die "usage: $SELF pq import <pq-secret.pem> [--replace]"
+      pq_supported || die "this openssl has no ML-KEM-1024 (need OpenSSL 3.5+) — import the key on a newer box"
+      openssl pkey -in "$f" -noout -check >/dev/null 2>&1 || die "$f is not a readable private key"
+      # captured, not piped into grep -q: under pipefail the SIGPIPE would fail the check
+      case "$(openssl pkey -in "$f" -text -noout 2>/dev/null)" in
+        *ML-KEM-1024*) ;;
+        *) die "$f is not an ML-KEM-1024 key — refusing to install it as the PQ secret";;
+      esac
+      if [ -f "$PQ_SECRET" ] && ! cmp -s "$f" "$PQ_SECRET"; then
+        [ "$replace" = 1 ] || die "a DIFFERENT PQ secret already exists at $PQ_SECRET — pass --replace to overwrite it (kits wrapped for the old key will not open)"
+      fi
+      umask 077; mkdir -p "$CONF_DIR"
+      install -m 600 "$f" "$PQ_SECRET"
+      openssl pkey -in "$PQ_SECRET" -pubout -out "$PQ_PUBLIC" 2>/dev/null || die "could not derive the PQ public key"
+      chmod 644 "$PQ_PUBLIC"
+      log "PQ secret installed (ML-KEM-1024, fingerprint $(pq_fpr))"
+      ;;
+    status)
+      local sup=0; pq_supported && sup=1
+      if [ "${1:-}" = --json ]; then
+        TC_PQ_SUP="$sup" TC_PQ_FPR="$(pq_fpr)" TC_PQ_SEC="$PQ_SECRET" TC_PQ_PUB="$PQ_PUBLIC" \
+        TC_PQ_CRYPTO="$CRYPTO" python3 -c '
+import json, os
+e = os.environ.get
+print(json.dumps({
+  "supported": e("TC_PQ_SUP") == "1", "alg": "ML-KEM-1024", "fpr": e("TC_PQ_FPR", ""),
+  "secret_present": os.path.exists(e("TC_PQ_SEC", "")), "public_present": os.path.exists(e("TC_PQ_PUB", "")),
+  "crypto": e("TC_PQ_CRYPTO", "classic")}))'
+        return 0
+      fi
+      echo "Post-quantum (ML-KEM-1024 envelope for hybrid kits)"
+      printf '  openssl ML-KEM   %s\n' "$([ "$sup" = 1 ] && echo available || echo 'NOT available (need OpenSSL 3.5+)')"
+      if [ -f "$PQ_PUBLIC" ]; then
+        printf '  key              ML-KEM-1024  %s\n' "$(pq_fpr)"
+        printf '  secret half      %s\n' "$([ -f "$PQ_SECRET" ] && echo 'ON THIS BOX — this machine can open hybrid kits' || echo 'NOT on this box (escrow only)')"
+      else
+        printf '  key              NONE — run: %s pq init\n' "$SELF"
+      fi
+      printf '  kit posture      %s (TIMECRATE_CRYPTO)\n' "$CRYPTO"
+      ;;
+    *) die "unknown pq subcommand '$sub' — expected init, import or status";;
+  esac
+}
+
 # ============================ dispatch ============================
 cmd="${1:-help}"; shift || true
 case "$cmd" in
@@ -3015,6 +3353,7 @@ case "$cmd" in
   pause) cmd_pause "$@";;
   history) cmd_history "$@";;
   alerts) cmd_alerts "$@";;
+  pq) cmd_pq "$@";;
   keys) cmd_keys "$@";;  import-key|import) cmd_import_key "$@";;
   verify-key) cmd_verify_key "$@";;  export-key) cmd_export_key "$@";;
   version|--version) echo "timecrate $VERSION";;

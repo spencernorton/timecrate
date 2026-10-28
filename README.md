@@ -32,6 +32,13 @@ that a restore would unpack as root. Restoring a kit older than the newest one r
 
 **Recovery needs nothing from this project.** A kit opens with `gpg`, `zstd` and `tar`, and the
 steps are on a printable sheet together with the key ([BREAK-GLASS.md](docs/BREAK-GLASS.md)).
+Since 3.1.0 the sheet also downloads as a PDF, and Google Drive is a direct sign-in
+destination (`remote connect --provider drive`, with the folder picked in the window).
+
+**Post-quantum hybrid kits (3.1.0).** With `TIMECRATE_CRYPTO=hybrid`, each new kit is the
+ordinary signed GPG kit wrapped in an ML-KEM-1024 envelope (OpenSSL), so breaking RSA-4096
+one day still does not open it. Opening a hybrid kit needs both secret keys; both are on the
+escrow sheet, and classic kits — including every kit already on a remote — stay readable.
 
 **It proves itself on a schedule.** A monthly drill imports only the escrowed key into an empty
 keyring and decrypts a real kit from the remote, then authenticates every other kit there. A
