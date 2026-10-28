@@ -283,6 +283,18 @@ class Probe(Adw.Application):
                                         % rp.r_drive.get_subtitle())
                     if "@" not in (rp.r_account.get_subtitle() or ""):
                         failures.append("account not shown: %r" % rp.r_account.get_subtitle())
+                    # Reconnecting an existing Drive account must reach OAuth rather than
+                    # fail the engine's existing-config guard. Capture without starting OAuth.
+                    old_async = tcgui.run_async
+                    calls = []
+                    tcgui.run_async = lambda argv, callback: calls.append(argv)
+                    rp.info["drive_configured"] = True
+                    rp.provider_row.set_selected(0)
+                    rp._connect()
+                    tcgui.run_async = old_async
+                    rp.provider_row.set_selected(1)
+                    if not calls or "--reauthorize" not in calls[0]:
+                        failures.append("Drive reconnect omitted --reauthorize: %r" % calls)
                     # nothing token-shaped may ever reach the UI
                     for w in (rp.r_token, rp.r_account, rp.r_path):
                         t = (w.get_subtitle() or "")

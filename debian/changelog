@@ -1,5 +1,7 @@
 timecrate (3.1.1) resolute; urgency=medium
 
+  * Stage the PQ escrow secret and unwrap hybrid kits in the quarterly
+    recovery guest before signature verification.
   * New application icon (blue crate with clock emblem), shipped as PNG at
     512/256/128 px in place of the scalable SVG.
   * Recovery drill now unwraps hybrid (ML-KEM) kits through the common

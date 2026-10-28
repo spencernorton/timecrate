@@ -1281,6 +1281,8 @@ class RemotePage(Adw.PreferencesPage):
         drive = self.provider_row.get_selected() == 0
         argv = ([TC, "remote", "connect", "--provider", "drive"] if drive
                 else [TC, "remote", "connect"])
+        if (drive and self.info.get("drive_configured")) or (not drive and self.info.get("configured")):
+            argv.append("--reauthorize")
         self.btn_connect.set_sensitive(False)
         self.window.log_line("$ " + " ".join(argv[1:]))
         self.window.toast("Finish the sign-in in your browser")

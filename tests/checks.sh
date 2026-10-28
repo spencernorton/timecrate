@@ -2902,6 +2902,14 @@ printf '%s' "$out64w" | grep -q 'a warning from the boot that never answered' \
   && printf '%s' "$out64w" | grep -q 'broken.service' \
   && ok "and the alert carries that boot's warnings and the failed units" \
   || no "the forced boot's journal and failed units are not in the alert"
+# Drive capstone must fetch using its dedicated OAuth config, not the main config.
+sed -i '2i echo "$*" >> /tmp/t64/rclone-calls' /tmp/t64/bin/rclone
+rm -f /tmp/t64/rclone-calls
+out64drive="$(TIMECRATE_REMOTE=gdrive:Backups TIMECRATE_DRIVE_CONF=/tmp/t64/rclone.conf t64run healthy)"
+printf '%s' "$out64drive" | grep -q 'CAPSTONE PASSED' \
+  && grep -q -- '--config /tmp/t64/rclone.conf copyto gdrive:Backups/' /tmp/t64/rclone-calls \
+  && ok "quarterly capstone fetches Drive kits with the dedicated config" \
+  || no "Drive capstone config selection failed"
 rm -rf /tmp/t64 /root/timecrate-capstone-work.* 2>/dev/null
 
 echo "== T65: post-quantum hybrid kits, Drive config routing, escrow PDF (3.1.0) =="
@@ -2931,6 +2939,24 @@ if TIMECRATE_CRYPTO=hybrid TIMECRATE_STAGING=/tmp/tm/staging-pq TIMECRATE_INCLUD
     [ -n "$ext" ] && [ "$(cat "$ext")" = hello ] \
       && ok "hybrid kit restores content intact" || no "hybrid restore lost the payload"
   else no "hybrid restore failed: $(tail -2 /tmp/t65r.out)"; fi
+  # The quarterly guest must recover hybrid kits with only staged escrow material.
+  mkdir -p "$IN64"
+  cp "$TIMECRATE_CONF/timecrate-secret.asc" "$IN64/escrow-key.asc"
+  cp "$TIMECRATE_CONF/timecrate-signing-public.asc" "$IN64/signing-pub.asc"
+  cp "$TIMECRATE_CONF/pq-secret.pem" "$IN64/pq-secret.pem"
+  stage64 "$pkit"
+  out65guest="$(bash "$RIV" 2>&1)"
+  printf '%s' "$out65guest" | grep -q '\[PASS\] kit decrypted, signed by' \
+    && printf '%s' "$out65guest" | grep -q '\[PASS\] extracted (.*TIMECRATE-MANIFESTS)' \
+    && ok "quarterly guest unwraps and authenticates hybrid kits" \
+    || no "quarterly guest failed hybrid recovery: $(printf '%s' "$out65guest" | grep -E 'FAIL|S4' | head -3)"
+  stage64 "$pkit"; rm -f "$IN64/pq-secret.pem"
+  out65missing="$(bash "$RIV" 2>&1)"
+  printf '%s' "$out65missing" | grep -q '\[FAIL\] PQ envelope recovery failed' \
+    && ! printf '%s' "$out65missing" | grep -q '^S5' \
+    && ok "quarterly guest rejects hybrid kits without PQ escrow before extract" \
+    || no "quarterly guest did not reject missing PQ escrow"
+  rm -rf /home/ubuntu/timecrate-in /restore /etc/timecrate-capstone-marker /etc/timecrate-capstone-restored
   cp "$pkit" /tmp/t65tamper.gpg; printf 'garbage' | dd of=/tmp/t65tamper.gpg bs=1 seek=3000 conv=notrunc 2>/dev/null
   "$TC" verify /tmp/t65tamper.gpg >/tmp/t65t.out 2>&1 \
     && no "tampered hybrid kit VERIFIED" || ok "tampered hybrid kit is rejected"

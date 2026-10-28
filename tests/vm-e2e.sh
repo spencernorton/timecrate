@@ -21,7 +21,7 @@ TOKEN="e2e-$(date +%s)-$RANDOM"
 PASS=0; FAIL=0
 ok(){ echo "  [PASS] $*"; PASS=$((PASS+1)); }
 no(){ echo "  [FAIL] $*"; FAIL=$((FAIL+1)); }
-cleanup(){ multipass delete --purge "$VM" >/dev/null 2>&1 || true; }
+cleanup(){ multipass delete --purge "$VM" >/dev/null 2>&1 || true; [ -z "${WORK:-}" ] || rm -rf -- "$WORK"; }
 trap cleanup EXIT
 
 command -v multipass >/dev/null || { echo "multipass is required" >&2; exit 1; }
@@ -113,7 +113,10 @@ done
 multipass transfer "$GUEST" "$VM":/home/ubuntu/e2e/guest.sh
 multipass exec "$VM" -- bash -c "printf '%s' '$TOKEN' > ~/e2e/token"
 if [ -n "${TIMECRATE_E2E_DRIVE_CONF:-}" ] && [ -n "${TIMECRATE_E2E_DRIVE_PATH:-}" ] && [ -f "${TIMECRATE_E2E_DRIVE_CONF:-}" ]; then
-  multipass transfer "$TIMECRATE_E2E_DRIVE_CONF" "$VM":/home/ubuntu/e2e/rclone-drive.conf
+  # Confined Multipass cannot read hidden ~/.config paths; stage privately under WORK.
+  install -m 600 "$TIMECRATE_E2E_DRIVE_CONF" "$WORK/rclone-drive.conf"
+  multipass transfer "$WORK/rclone-drive.conf" "$VM":/home/ubuntu/e2e/rclone-drive.conf
+  rm -f "$WORK/rclone-drive.conf"
   multipass exec "$VM" -- chmod 600 /home/ubuntu/e2e/rclone-drive.conf
   printf '%s' "$TIMECRATE_E2E_DRIVE_PATH" > "$WORK/remote"
   printf 'real' > "$WORK/leg"

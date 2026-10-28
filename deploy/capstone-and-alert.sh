@@ -52,6 +52,9 @@ USER_HOME="$(getent passwd "$TC_USER" | cut -d: -f6)"
 CONF="${TIMECRATE_CONF:-$USER_HOME/.config/timecrate}"
 RCONF="${TIMECRATE_RCLONE_CONF:-$USER_HOME/.config/rclone/rclone.conf}"
 REMOTE="${TIMECRATE_REMOTE-dropbox:TIMECRATE}"   # the engine's own default
+if [ "${REMOTE%%:*}" = "${TIMECRATE_DRIVE_REMOTE:-gdrive}" ]; then
+  RCONF="${TIMECRATE_DRIVE_CONF:-$CONF/rclone-drive.conf}"
+fi
 WORK=""
 
 problem=""
@@ -281,6 +284,11 @@ else
   asuser cp "$CONF/timecrate-secret.asc" "$WORK/escrow-key.asc" \
     || fail "could not stage the escrowed key (is $CONF readable by $TC_USER?)"
   asuser cp "$CONF/timecrate-signing-public.asc" "$WORK/signing-pub.asc" 2>/dev/null || true
+  # Hybrid recovery needs its separate escrowed PQ secret in the guest.
+  if asuser head -c 13 "$WORK/kit.tar.zst.gpg" | grep -q '^TIMECRATE-PQ1'; then
+    asuser cp "${TIMECRATE_PQ_SECRET:-$CONF/pq-secret.pem}" "$WORK/pq-secret.pem" \
+      || fail "could not stage the PQ secret for hybrid recovery"
+  fi
   # recover-in-vm.sh normally lives in /opt or /usr/share — OUTSIDE $HOME, where the confined snap
   # cannot see it at all. Copy it in and transfer from here like everything else.
   asuser cp "$RECOVER_SRC" "$WORK/recover-in-vm.sh" || fail "could not stage recover-in-vm.sh"
@@ -334,7 +342,7 @@ if [ -z "$problem" ]; then
     fail "multipass could not launch $IMG as $VM even after restarting the daemon (hypervisor/daemon on this host, NOT a recovery failure)"
   else
     mp exec "$VM" -- mkdir -p /home/ubuntu/timecrate-in >/dev/null 2>&1
-    for f in kit.tar.zst.gpg kit.sha256 escrow-key.asc signing-pub.asc; do
+    for f in kit.tar.zst.gpg kit.sha256 escrow-key.asc signing-pub.asc pq-secret.pem; do
       [ -s "$WORK/$f" ] || continue
       vm_put "$WORK/$f" "/home/ubuntu/timecrate-in/$f" || fail "staging $f into the VM did not land"
     done
