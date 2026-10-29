@@ -2,6 +2,12 @@
 
 All notable changes to Timecrate are documented here.
 
+## Unreleased
+
+- Reduce the application icon's transparent padding so the blue crate renders at
+  a comparable size to neighboring dock icons. Update the source artwork and all
+  three packaged PNG sizes while preserving transparency.
+
 ## 3.1.1 — 2026-10-28
 
 - New application icon: a blue crate with a clock-and-arrow emblem, shipped as PNG at
