@@ -1,3 +1,5 @@
+<p align="center"><img src="gui/dev.norvi.Timecrate.png" width="96" alt="Timecrate recovery icon"></p>
+
 <h1 align="center">Timecrate</h1>
 
 <p align="center">
@@ -7,11 +9,28 @@
 
 <p align="center">
   <a href="https://github.com/spencernorton/timecrate/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/spencernorton/timecrate/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/spencernorton/timecrate/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencercnorton/timecrate?label=release&sort=semver"></a>
+  <a href="https://github.com/spencernorton/timecrate/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencernorton/timecrate?label=release&sort=semver"></a>
   <a href="#install"><img alt="Install on Ubuntu 26.04" src="https://img.shields.io/badge/install-Ubuntu%2026.04-e95420.svg"></a>
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--2.0--or--later-blue.svg"></a>
   <a href="https://buy.stripe.com/8x26oH2U44f65TRe574wM04"><img alt="Donate" src="https://img.shields.io/badge/donate-Stripe-635bff.svg?logo=stripe&logoColor=white"></a>
 </p>
+
+<p align="center"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/demos/timecrate-window-still.png"><img src="docs/demos/timecrate-window.gif" alt="Review backup status and the kit list, then open retention and backup settings." width="900"></picture></p>
+
+The real Timecrate window with synthetic CLI replies. Backup counts, history and remote state are demonstration fixtures; the clip exercises the interface. [Recording source and still image](docs/demos/README.md).
+
+```mermaid
+flowchart LR
+    State[Selected files and package manifest] --> Pack[Archive and compress]
+    Pack --> Sign[Encrypt and sign]
+    Sign --> Remote[(Your rclone remote)]
+    Remote --> Verify[Verify signature and decrypt]
+    Escrow[Your off-machine recovery keys] --> Verify
+    Verify --> Restore[Restore or recovery drill]
+```
+
+Timecrate backs up the state a package manager cannot recreate. Recovery
+authenticates a kit before extracting it; the optional desktop window calls the same CLI.
 
 Timecrate does not image a disk. It backs up the slice of a machine that a package manager cannot
 give back — `/etc`, your keys and dotfiles, settings, documents, the software under `/usr/local` —
