@@ -11,7 +11,7 @@
 # Break-glass needs only gpg + zstd + tar (see docs/BREAK-GLASS.md).
 set -euo pipefail
 
-VERSION="3.1.1"
+VERSION="3.1.2"
 SELF="$(basename "$0")"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
