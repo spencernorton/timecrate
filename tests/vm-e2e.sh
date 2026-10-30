@@ -46,8 +46,8 @@ echo "S1: install the built packages"
 sudo apt-get update -qq >/dev/null 2>&1
 sudo apt-get install -y -qq ~/debs/timecrate_*_all.deb ~/debs/timecrate-gui_*_all.deb >/tmp/apt.log 2>&1 \
   && ok "timecrate + timecrate-gui installed" || { no "package install failed: $(tail -1 /tmp/apt.log)"; }
-command -v timecrate >/dev/null && [ "$(timecrate version)" = "timecrate 3.1.1" ] \
-  && ok "installed engine reports 3.1.1" || no "engine missing or wrong version"
+command -v timecrate >/dev/null && [ "$(timecrate version)" = "timecrate 3.1.2" ] \
+  && ok "installed engine reports 3.1.2" || no "engine missing or wrong version"
 
 echo "S2: init creates the GPG and PQ identities"
 mkdir -p ~/e2e-data && printf 'marker %s\n' "$TOKEN" > ~/e2e-data/marker.txt

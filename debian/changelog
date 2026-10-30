@@ -1,3 +1,9 @@
+timecrate (3.1.2) resolute; urgency=medium
+
+  * Refresh the desktop icon with an orange recovery-and-snapshots design.
+
+ -- Norvi <apt@globalentry.systems>  Fri, 30 Oct 2026 11:56:48 +0000
+
 timecrate (3.1.1) resolute; urgency=medium
 
   * Stage the PQ escrow secret and unwrap hybrid kits in the quarterly

@@ -4,6 +4,8 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.1.2 — 2026-10-30
+
 - Refresh the application icon with an orange recovery-and-snapshots design,
   keeping transparent corners and a clear silhouette at dock sizes.
 
