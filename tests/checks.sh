@@ -3059,7 +3059,9 @@ for w in drill-and-alert.sh overnight-suite.sh capstone-and-alert.sh; do
   sed "s#/etc/timecrate/timecrate.conf#$t66/etc/timecrate/timecrate.conf#g; s#/etc/timecrate.env#$t66/etc/timecrate.env#g" \
     "$REPO/deploy/$w" > "$t66/$w"
 done
-PATH="$t66/bin:$PATH" TIMECRATE_T66_PRESET=kept bash "$t66/drill-and-alert.sh" > "$t66/drill.out" 2>&1
+# the suite exports its own TIMECRATE_* at the top; these runs need the caller's environment clean
+t66u=(); for v in $(compgen -e | grep '^TIMECRATE_' || true); do t66u+=(-u "$v"); done
+env "${t66u[@]}" PATH="$t66/bin:$PATH" TIMECRATE_T66_PRESET=kept bash "$t66/drill-and-alert.sh" > "$t66/drill.out" 2>&1
 if grep -q 'engine-env REMOTE=unset USER=unset PRESET=kept' "$t66/drill.out"; then
   ok "drill: the engine sees no config-file value as an override, and the real environment survives"
 else no "drill leaked config into the engine's environment: $(grep engine-env "$t66/drill.out" | head -1)"; fi
@@ -3067,7 +3069,7 @@ else no "drill leaked config into the engine's environment: $(grep engine-env "$
 for w in overnight-suite.sh capstone-and-alert.sh; do
   # up to the un-export (capstone does it after its per-user read), then close that loop
   { sed -n '1,/export -n "\${_v?}"/p' "$t66/$w"; echo 'done'; } > "$t66/$w.head"
-  if (cd "$t66" && PATH="$t66/bin:$PATH" TIMECRATE_T66_PRESET=kept \
+  if (cd "$t66" && env "${t66u[@]}" PATH="$t66/bin:$PATH" TIMECRATE_T66_PRESET=kept \
         bash -c '. "$1"; [ -z "$(compgen -e | grep "^TIMECRATE_" | grep -v "^TIMECRATE_T66_PRESET$")" ] && [ "$TIMECRATE_REMOTE" = system:Old ]' _ "$t66/$w.head") 2>/dev/null; then
     ok "$w: config values stay readable in the script but are not exported"
   else no "$w still exports config-file TIMECRATE_* values"; fi
