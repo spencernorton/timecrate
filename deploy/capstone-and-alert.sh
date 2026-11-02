@@ -37,6 +37,12 @@ IMG="${TIMECRATE_CAPSTONE_IMAGE:-26.04}"
 PREFLIGHT=0
 [ "${1:-}" = "--preflight" ] && PREFLIGHT=1
 
+# Sourced for this script's own use only. `set -a` would also EXPORT every TIMECRATE_* value, and
+# the engine treats an exported TIMECRATE_* as the caller's override of BOTH config files -- so the
+# system file's TIMECRATE_REMOTE silently beat the per-user one the window writes, and the drill
+# fetched from a remote no backup had used for days (2026-11-01). Un-export what the files set; the
+# engine reads the same files itself, in its own order. Pre-existing environment is untouched.
+_tc_preset="$(compgen -e | grep '^TIMECRATE_' || true)"
 for f in /etc/timecrate/timecrate.conf /etc/timecrate.env; do
   # shellcheck disable=SC1090
   [ -r "$f" ] && { set -a; . "$f"; set +a; }
@@ -49,6 +55,9 @@ USER_HOME="$(getent passwd "$TC_USER" | cut -d: -f6)"
 # shellcheck disable=SC1090
 [ -n "$USER_HOME" ] && [ -r "$USER_HOME/.config/timecrate/timecrate.conf" ] \
   && { set -a; . "$USER_HOME/.config/timecrate/timecrate.conf"; set +a; }
+for _v in $(compgen -v | grep '^TIMECRATE_' || true); do
+  printf '%s\n' "$_tc_preset" | grep -qxF "$_v" || export -n "${_v?}"
+done
 CONF="${TIMECRATE_CONF:-$USER_HOME/.config/timecrate}"
 RCONF="${TIMECRATE_RCLONE_CONF:-$USER_HOME/.config/rclone/rclone.conf}"
 REMOTE="${TIMECRATE_REMOTE-dropbox:TIMECRATE}"   # the engine's own default

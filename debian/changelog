@@ -1,3 +1,13 @@
+timecrate (3.1.3) resolute; urgency=medium
+
+  * The drill, capstone and overnight wrappers no longer export the system
+    config as an override: the drill fetched from the system file's remote
+    while backups used the per-user one the window writes.
+  * New transitional time-machine-gui package: upgrading it removes the old
+    Time Machine launcher, so a migrated machine lists Timecrate once.
+
+ -- Norvi <apt@globalentry.systems>  Mon, 02 Nov 2026 12:45:00 +0000
+
 timecrate (3.1.2) resolute; urgency=medium
 
   * Refresh the desktop icon with an orange recovery-and-snapshots design.
