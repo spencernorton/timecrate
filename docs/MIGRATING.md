@@ -39,6 +39,9 @@ systemctl is-active time-machine-backup.service time-machine-drill.service time-
 
 The second command must print `inactive` three times: nothing of the old version is running.
 Keep the old package installed until Timecrate has run well for a while — it is the rollback.
+From 3.1.3 the archive carries a transitional `time-machine-gui` that replaces the old window
+(and its "Time Machine" launcher) with nothing; the rollback below needs only the command-line
+`time-machine` package, which is left alone.
 Two tools pruning one remote would count each other's kits and delete kits early, so Timecrate
 refuses to upload while `time-machine-backup.timer` is armed.
 

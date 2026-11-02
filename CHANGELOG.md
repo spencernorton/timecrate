@@ -4,6 +4,19 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.1.3 — 2026-11-02
+
+- **The monthly drill checks the remote your backups use.** The drill, capstone and overnight
+  wrappers read the system config with `set -a`, which exported its `TIMECRATE_REMOTE` — and the
+  engine treats an exported setting as an override of both config files. On a machine whose
+  window had set a per-user destination, backups went there while the drill fetched from the
+  system file's old remote and reported a deletion that never happened. The wrappers still read
+  the files for their own checks but no longer export what they read.
+- **The old Time Machine launcher retires itself.** A new transitional `time-machine-gui`
+  package replaces the pre-3.0 window with nothing, so an ordinary upgrade leaves one Timecrate
+  entry in the applications list instead of two. The command-line `time-machine` package, the
+  rollback, is untouched.
+
 ## 3.1.2 — 2026-10-30
 
 - Refresh the application icon with an orange recovery-and-snapshots design,

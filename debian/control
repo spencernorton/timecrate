@@ -54,3 +54,20 @@ Description: encrypted, signed off-site disaster-recovery backup (graphical inte
  .
  This package is separate so that a headless machine can run backups without
  pulling in a desktop stack.
+
+Package: time-machine-gui
+Architecture: all
+Section: oldlibs
+Depends: ${misc:Depends},
+         timecrate-gui
+Recommends: time-machine
+Description: transitional package - use timecrate-gui
+ The graphical interface formerly named Time Machine is now timecrate-gui.
+ Upgrading to this package replaces the old window's launcher with nothing,
+ so a machine that migrated keeps one Timecrate entry in its applications
+ instead of two. It can be removed safely.
+ .
+ The command-line time-machine package is untouched: it stays installed and
+ disarmed as the documented rollback until it is purged. The old window
+ depended on it, so where it was pulled in automatically the recommendation
+ is what keeps an autoremove from taking the rollback with the launcher.
