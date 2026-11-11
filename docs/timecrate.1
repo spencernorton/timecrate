@@ -209,6 +209,8 @@ A folder must exist and be writable by the configured account. It is never creat
 a backup: a drive that is not mounted stops the run, instead of being replaced by a directory on
 the disk the backup is meant to survive. The kits in a destination folder are left out of later
 kits; anything else in that folder is backed up as usual.
+Each machine needs a destination of its own. Kits are named by date alone, and retention, the
+anti-rollback count and the recovery drill treat every kit at the destination as this machine's.
 .TP
 .B set-mirror " \fIremote:path\fR|\fIfolder\fR|\fBoff\fR [\fB\-\-yes\fR]"
 Send a second copy of every new kit somewhere else

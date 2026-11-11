@@ -111,6 +111,9 @@ Upgrading a machine that runs the packages from before 3.0.0? Follow
      user, and a drive that is not mounted stops the backup rather than being quietly replaced
      by a directory on the disk you are backing up.
 
+   Give each machine a folder of its own. A kit is named by its date and nothing else, so two
+   machines sending to one folder would count, prune and try to verify each other's kits.
+
    For a second copy somewhere else: `timecrate remote set-mirror <remote:path>|<folder>`.
 3. **Make the keys**, as that user: `timecrate init`. Then escrow the secret key **off this machine**
    — `timecrate escrow-doc` writes a printable sheet with a QR code, `timecrate export-key` a file.
