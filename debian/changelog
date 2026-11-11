@@ -9,7 +9,8 @@ timecrate (3.2.0) resolute; urgency=high
   * A folder on this machine is a destination (remote set-path <folder>);
     new remote list and remote set-mirror.
   * The anti-rollback anchor records its destination, so a changed
-    destination no longer reads as a deletion; uploads are hash-checked.
+    destination no longer reads as a deletion; uploads are hash-checked;
+    a folder inside the destination is no longer read as a kit.
   * New config set-user and config get; status reports an unpinned account.
   * The monthly drill lists each archive it authenticates, and its wrapper
     no longer downloads the whole archive a second time.

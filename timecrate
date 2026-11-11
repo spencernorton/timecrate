@@ -134,9 +134,14 @@ _tc_read_user_conf(){
     # No such file is the ordinary case. One that is there and closed to the account is what a
     # release before 3.2.0 left when `remote set-path` ran under sudo, and reading on without it
     # would send tonight's kit wherever the defaults point, in the default posture.
-    as_user test -e "$1" || return 0
+    # So is a folder the account cannot enter, which `init` under sudo left. The account itself
+    # says which it is: root does not look into that home to find out. (Somebody else's look at
+    # this machine's backups reads the defaults, as it always did.)
+    [ "$TC_DROP" = 1 ] || [ "$(id -un)" = "$TC_USER" ] || return 0
+    # shellcheck disable=SC2016  # the $-name belongs to the inner sh
+    as_user test -e "$1" || as_user sh -c '[ -d "$1" ] && [ ! -x "$1" ]' _ "${1%/*}" || return 0
     case "${2:-}" in help|-h|--help|version|--version) return 0;; esac
-    die "$1 cannot be read by $TC_USER, so the settings in it (where the backups go, for one) would be ignored. Hand it back with:  sudo chown -h $TC_USER: $1"
+    die "$1 cannot be read by $TC_USER, so the settings in it (where the backups go, for one) would be ignored. Hand it back with:  sudo chown -hR $TC_USER: ${1%/*}"
   fi
   TC_CONF_SOURCES="${TC_CONF_SOURCES:+$TC_CONF_SOURCES }$1"
   while IFS= read -r -d '' kind && IFS= read -r -d '' val; do
@@ -331,6 +336,10 @@ fi
 # refreshed token is simply the account's own write.
 rc(){
   local conf="$RCLONE_CONF" a named=0
+  # A listing here is of kits, or of one file. rclone lists a folder inside the destination under
+  # any --include, and each one read as one more kit: counted in the anchor, swept by verify, and
+  # taken as proof that the kit just sent had arrived.
+  [ "${1:-}" != lsf ] || set -- "$@" --files-only
   # Google Drive sign-in keeps its own config (DRIVE_CONF): any argument naming the drive
   # remote selects it, so a password-encrypted main config can neither block nor be unlocked
   # by a Drive command. TC_RC_CONF overrides for callers (config dump) that name no remote.
@@ -371,6 +380,9 @@ rc_put(){   # <local file> <remote path>
 # none of these, the size check stands alone, as it would for rclone itself.
 rc_same_hash(){   # <local file> <remote path>
   local t there here
+  # rclone's own way out for a backend whose reported hash is not the content's: what it is told
+  # not to check, this does not check either
+  case "${RCLONE_IGNORE_CHECKSUM:-}" in 1|t|T|true|TRUE|True) return 0;; esac
   for t in md5 sha1 dropbox quickxor; do
     there="$(rc hashsum "$t" "$2" 2>/dev/null | awk 'NR==1{print $1}' || true)"
     case "$there" in ''|*[^0-9a-f]*) continue;; esac
@@ -714,12 +726,13 @@ build_exclude(){
     [ -n "$p" ] && printf '%s\n' "${p#/}"
   done
   # a destination that is a folder on this machine: last night's kits are not tonight's data.
-  # Only the kits: whatever else that folder holds is backed up like any other
+  # Only the kits, at any depth (a sync tool keeps older ones in a folder of its own): whatever
+  # else that folder holds is backed up like any other
   local q
   for p in "$REMOTE" "$REMOTE2"; do
     case "$p" in /*)
       q="$(printf '%s' "${p#/}" | sed 's/[][*?\\]/\\&/g')"   # the folder's name is not a pattern
-      printf '%s\n' "$q/${PREFIX}-*" "$q/${LEGACY_PREFIX}-*";;
+      printf '%s\n' "$q/${PREFIX}-*" "$q/${LEGACY_PREFIX}-*" "$q/*/${PREFIX}-*" "$q/*/${LEGACY_PREFIX}-*";;
     esac
   done
 }
@@ -786,6 +799,7 @@ generate_manifests(){
 # Write a small NON-SECRET, user-readable status snapshot for the GUI/status command.
 write_status(){
   as_user mkdir -p "$STATE_DIR" 2>/dev/null || true
+  anchor_pin
   local fpr last drill nloc hist
   fpr="$(user_line "$RECIPIENTS_FILE" || true)"
   hist="$(user_cat "$STATE_DIR/log" || true)"
@@ -802,7 +816,7 @@ write_status(){
   fi
   nloc="$(find "$STAGING_ROOT" -maxdepth 1 -name "${PREFIX}-*.tar.zst.gpg" 2>/dev/null | wc -l | tr -d ' ' || true)"
   local exp_latest="" exp_count=0 anchor
-  if anchor="$(anchor_for expected "$REMOTE")"; then read -r exp_latest exp_count _ <<< "$anchor" || true; fi
+  if anchor="$(anchor_for expected "$REMOTE")"; then read -r exp_latest exp_count _ <<< "$anchor" || true; exp_count="${exp_count%+}"; fi
   # built by python3 (already required by `status`) — a path or remote containing a quote would
   # silently emit invalid JSON through printf, and the GUI would render "status unavailable"
   local json
@@ -1311,12 +1325,41 @@ anchor_for(){
   local line kit="" count="" dest=""
   line="$(user_line "$STATE_DIR/$1")" || return 1
   read -r kit count dest <<< "$line" || true
-  [ -n "$dest" ] || dest="$(user_cat "$STATE_DIR/status.json" | python3 -c '
-import json, sys
-try: print(json.load(sys.stdin).get(sys.argv[1]) or "")
-except Exception: pass' "remote${1#expected}" 2>/dev/null || true)"
+  # The rest of the line, as written. An anchor with none is from before 3.2.0, and its count is
+  # marked with a "+": it counted the folders in the destination as kits (see rc).
+  if [ -n "$dest" ]; then dest="${line#* * }"; else dest="$(anchor_dest "$1")"; count="${count:+$count+}"; fi
   [ -z "$dest" ] || [ "$dest" = "$2" ] || return 1
   printf '%s %s' "$kit" "$count"
+}
+# The destination status.json records for anchor $1: the one an anchor from before 3.2.0 describes.
+anchor_dest(){
+  user_cat "$STATE_DIR/status.json" | python3 -c '
+import json, sys
+try: print(json.load(sys.stdin).get(sys.argv[1]) or "")
+except Exception: pass' "remote${1#expected}" 2>/dev/null || true
+}
+# write_status is about to record the destination in effect over that, so such an anchor is given
+# its destination first. Otherwise any command that refreshes the status between a changed
+# destination and the next backup would make the old count read as kits deleted from the new one.
+anchor_pin(){
+  local a line kit count dest
+  for a in expected expected2; do
+    line="$(user_line "$STATE_DIR/$a")" || continue
+    read -r kit count dest <<< "$line" || true
+    [ -n "$count" ] && [ -z "$dest" ] || continue
+    dest="$(anchor_dest "$a")"
+    [ -z "$dest" ] || printf '%s %s+ %s\n' "$kit" "$count" "$dest" | user_write "$STATE_DIR/$a" || true
+  done
+}
+# Whether destination $3, holding $2 kits now, is short of the count an anchor gives ($1). A count
+# marked "+" is owed the folders there, which is how that release counted: the first check after
+# the upgrade would otherwise read as that many kits deleted.
+anchor_short(){
+  local want="${1%+}" have="${2:-0}"
+  case "$want" in ''|*[^0-9]*) return 1;; esac
+  [ "$have" -lt "$want" ] || return 1
+  case "$1" in *+) have=$(( have + $(rc lsd "$3" 2>/dev/null | grep -c . || true) ));; esac
+  [ "$have" -lt "$want" ]
 }
 # Compare a remote's CURRENT state against its recorded anchor ($2) and warn loudly on
 # deletion/rollback. Runs at every BACKUP (daily) — the anchor is rebaselined right after, so
@@ -1330,19 +1373,23 @@ check_remote_anchor(){
   local exp_l="" exp_c="" listing cur_l cur_c out=""
   anchor="$(anchor_for "$2" "$remote")" || return 0
   read -r exp_l exp_c _ <<< "$anchor" || true
-  listing="$(rc lsf "$remote" --include "$KIT_GLOB" 2>/dev/null | kit_sort || true)"
+  # rclone's 3 and 4 say the folder itself is not there, which is the deletion this check is for.
+  # Any other failure is a listing that did not happen (the network, at 03:00), not an empty one.
+  rc_capture lsf "$remote" --include "$KIT_GLOB" || case "$?" in 3|4) ;; *)
+    warn "could not list $remote (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is not checked this run"
+    return 0;; esac
+  listing="$(printf '%s\n' "$RC_OUT" | kit_sort || true)"
   cur_l="$(printf '%s\n' "$listing" | tail -1)"
   cur_c="$(printf '%s\n' "$listing" | grep -c . || true)"
   if [ -n "$exp_l" ]; then
     if [ -z "$cur_l" ]; then
-      out="$remote holds ZERO kits (expected $exp_c, newest $exp_l)"
+      out="$remote holds ZERO kits (expected ${exp_c%+}, newest $exp_l)"
     elif kit_older "$cur_l" "$exp_l"; then
       out="$remote newest kit $cur_l is OLDER than recorded $exp_l (ROLLBACK)"
     fi
   fi
-  case "$exp_c" in ''|*[^0-9]*) :;; *)
-    [ "${cur_c:-0}" -ge "$exp_c" ] || out="${out:+$out; }$remote holds ${cur_c:-0} kits, expected >= $exp_c (DELETION — recover them from the provider's version history before it expires)";;
-  esac
+  ! anchor_short "$exp_c" "$cur_c" "$remote" \
+    || out="${out:+$out; }$remote holds ${cur_c:-0} kits, expected >= ${exp_c%+} (DELETION — recover them from the provider's version history before it expires)"
   [ -z "$out" ] || warn "REMOTE-ALERT: $out"
 }
 
@@ -2250,7 +2297,7 @@ cmd_recovery_drill(){
     # (a fresh backup would rebaseline the anchor and destroy the evidence while the provider's
     # version history keeps expiring)
     local was; if was="$(anchor_for expected "$REMOTE")"; then
-      die "REMOTE DELETION: 0 kits on $REMOTE but the last backup recorded $was — recover them from the provider's version history NOW, and do NOT run a backup first"
+      die "REMOTE DELETION: 0 kits on $REMOTE but the last backup recorded ${was%+} — recover them from the provider's version history NOW, and do NOT run a backup first"
     fi
     die "no kit on $REMOTE to drill against — run a backup first"
   fi
@@ -2310,9 +2357,8 @@ cmd_recovery_drill(){
     if [ -n "$exp_latest" ] && [ -n "$newest" ] && kit_older "$newest" "$exp_latest"; then
       extra_fail="REMOTE ROLLBACK: newest remote kit $newest is OLDER than expected $exp_latest"
     fi
-    case "$exp_count" in ''|*[^0-9]*) :;; *)
-      [ "$nkits" -ge "$exp_count" ] || extra_fail="${extra_fail:+$extra_fail; }REMOTE DELETION: $nkits kits on remote, expected >= $exp_count (recover them from the provider's version history)";;
-    esac
+    ! anchor_short "$exp_count" "$nkits" "$REMOTE" \
+      || extra_fail="${extra_fail:+$extra_fail; }REMOTE DELETION: $nkits kits on remote, expected >= ${exp_count%+} (recover them from the provider's version history)"
   fi
   # sha256 sidecar is only a cheap pre-filter (remote-write attackers forge sidecars too);
   # the signature is the proof, and the archive must decompress and list as well: the kit you
@@ -2365,10 +2411,9 @@ cmd_recovery_drill(){
     if [ -n "$e2l" ] && ! printf '%s\n' "$l2" | grep -qFx "$e2l"; then
       extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DEGRADED: recorded newest $e2l missing from $REMOTE2"
     fi
-    case "$e2c" in ''|*[^0-9]*) :;; *)
-      [ "${n2:-0}" -ge "$e2c" ] || extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DELETION: ${n2:-0} kits, expected >= $e2c";;
-    esac
-    log "remote2 anchor check: ${n2:-0} kits on $REMOTE2 (expected >= ${e2c:-?})"
+    ! anchor_short "$e2c" "$n2" "$REMOTE2" \
+      || extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DELETION: ${n2:-0} kits, expected >= ${e2c%+}"
+    e2c="${e2c%+}"; log "remote2 anchor check: ${n2:-0} kits on $REMOTE2 (expected >= ${e2c:-?})"
   fi
 
   as_user mkdir -p "$STATE_DIR" 2>/dev/null || true

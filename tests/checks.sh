@@ -3118,7 +3118,10 @@ else
   mkdir -p "$t67/etc" "$t67/dest2" "$t67/rs/timecrate"
   chmod 755 "$t67" "$t67/etc" "$t67/dest2" "$t67/rs" "$t67/rs/timecrate"; chown "$u67:" "$t67/dest2"
   # the destination sits INSIDE the backed-up tree on purpose: a folder another program syncs
-  as67 mkdir -p "$h67/docs/kits"; as67 sh -c "head -c 300000 /dev/urandom > '$h67/docs/a.bin'; echo keep67 > '$h67/docs/kits/note.txt'"
+  as67 mkdir -p "$h67/docs/kits/.stversions"; as67 sh -c "head -c 300000 /dev/urandom > '$h67/docs/a.bin'; echo keep67 > '$h67/docs/kits/note.txt'"
+  # ...and a sync tool's own folder of older versions of them. A folder inside the destination
+  # is also what rclone lists under any filter: everything below must not take it for a kit
+  as67 sh -c "echo old > '$h67/docs/kits/.stversions/timecrate-2020-01-01_00-00-00.tar.zst~20200102-000000.gpg'"
   printf 'etc/hostname\n~/docs\n' > "$t67/etc/include"; printf '*.cache\n' > "$t67/etc/exclude"
   printf 'TIMECRATE_MIN_MB=0\nTIMECRATE_KEEP=3\n' > "$t67/etc/timecrate.conf"
   printf 'T67_ALERT_TOKEN=sekret-67\nRCLONE_TPSLIMIT=7\n' > "$t67/etc/timecrate.env"
@@ -3214,7 +3217,7 @@ EOF
   [ -n "$ext67" ] && cmp -s "$ext67/a.bin" "$h67/docs/a.bin" \
     && ok "restore fetches, authenticates and extracts it" || no "restore: $(tail -2 "$t67/r.out" | tr '\n' '|')"
   [ -n "$ext67" ] && [ -z "$(find "$ext67/kits" -name 'time*' 2>/dev/null | head -1)" ] \
-    && ok "the kits in a destination folder inside the backed-up tree are left out of the next one" \
+    && ok "the kits in a destination folder inside the backed-up tree are left out of the next one, at any depth" \
     || no "last night's kits were archived into tonight's: $(ls "$ext67/kits" 2>/dev/null | head -2 | tr '\n' ' ')"
   [ "$(cat "${ext67:-/nonexistent}/kits/note.txt" 2>/dev/null)" = keep67 ] \
     && ok "...and only the kits: what else that folder holds is backed up" \
@@ -3336,6 +3339,31 @@ STUB
   ! grep -q 'REMOTE-ALERT' "$t67/b8.out" \
     && ok "...and stays quiet about a destination it was not written for" \
     || no "an older anchor for another destination raised: $(grep REMOTE-ALERT "$t67/b8.out" | tail -1)"
+  # a command that refreshes status.json in between must not hand that anchor the new destination
+  as67 sh -c "echo 'timecrate-2099-01-01_00-00-00.tar.zst.gpg 99' > '$s67/expected'; sed -i 's#$h67/kits2#$h67/elsewhere#' '$s67/status.json'"
+  tc67 pause off >/dev/null 2>&1 || true
+  grep -q "+ $h67/elsewhere\$" "$s67/expected" \
+    && ok "an older anchor is given its destination before the status is rewritten" \
+    || no "older anchor after a status rewrite: $(cat "$s67/expected" 2>&1)"
+  sleep 1; tc67 backup >"$t67/b8b.out" 2>&1 || true
+  ! grep -q 'REMOTE-ALERT' "$t67/b8b.out" \
+    && ok "...so a status refresh between the change and the backup raises nothing either" \
+    || no "an older anchor raised after a status rewrite: $(grep REMOTE-ALERT "$t67/b8b.out" | tail -1)"
+  # an older anchor counted a folder in the destination as a kit. It is owed that folder, so the
+  # first backup after the upgrade does not read as a kit deleted -- and it is owed no more
+  as67 mkdir -p "$h67/kits2/afolder"
+  l67="$(tc67 list 2>/dev/null | grep 'tar\.zst\.gpg' | tail -1)"; c67="$(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')"
+  as67 sh -c "echo '$l67 $((c67 + 1))' > '$s67/expected'"
+  sleep 1; tc67 backup >"$t67/b8c.out" 2>&1 || true
+  ! grep -q 'REMOTE-ALERT' "$t67/b8c.out" \
+    && ok "an older anchor that counted a folder as a kit raises nothing after the upgrade" \
+    || no "older anchor, one folder: $(grep REMOTE-ALERT "$t67/b8c.out" | tail -1)"
+  l67="$(tc67 list 2>/dev/null | grep 'tar\.zst\.gpg' | tail -1)"; c67="$(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')"
+  as67 sh -c "echo '$l67 $((c67 + 2))' > '$s67/expected'"
+  sleep 1; tc67 backup >"$t67/b8d.out" 2>&1 || true
+  grep -q 'REMOTE-ALERT.*DELETION' "$t67/b8d.out" \
+    && ok "...and a kit missing beyond the folders that are there still raises the alert" \
+    || no "older anchor, one folder, two short: $(tail -2 "$t67/b8d.out" | tr '\n' '|')"
 
   # n) a kit that arrives the right size with the wrong content is not an upload
   k67(){ find "$h67/kits2" -name '*.tar.zst.gpg' | wc -l | tr -d ' '; }
@@ -3355,17 +3383,48 @@ SHIM
   elif grep -q 'upload FAILED' "$t67/b9.out" && [ "$(k67)" = "$n67" ]; then
     ok "a stored kit whose hash differs is refused and removed, and the local copy is kept"
   else no "corrupt upload: $(tail -1 "$t67/b9.out") — kits there: $(k67), were $n67"; fi
+  sleep 1
+  if RCLONE_IGNORE_CHECKSUM=true RC_TRIES=1 tc67 backup >"$t67/b9b.out" 2>&1; then
+    ok "...unless rclone is told to ignore checksums, which the check honours"
+  else no "RCLONE_IGNORE_CHECKSUM was not honoured: $(tail -1 "$t67/b9b.out")"; fi
   rm -f /usr/local/bin/rclone
+
+  # n2) a listing that fails is not an empty destination: the nightly check says it could not
+  # look, where a network outage at backup time used to read as every kit deleted
+  cat > /usr/local/bin/rclone <<'SHIM'
+#!/bin/bash
+case " $* " in *" lsf "*) echo "simulated outage" >&2; exit "$(cat /tmp/t67-lsf-rc)";; esac
+exec /usr/bin/rclone "$@"
+SHIM
+  chmod 755 /usr/local/bin/rclone
+  echo 1 > /tmp/t67-lsf-rc; chmod 644 /tmp/t67-lsf-rc    # the account's rclone reads it
+  sleep 1; RC_TRIES=1 tc67 backup >"$t67/b10.out" 2>&1 || true
+  ! grep -q 'REMOTE-ALERT' "$t67/b10.out" && grep -q 'could not list' "$t67/b10.out" \
+    && ok "a listing that fails is reported as not checked, never as every kit deleted" \
+    || no "failed listing: $(grep -E 'REMOTE-ALERT|could not list' "$t67/b10.out" | tail -2 | tr '\n' '|')"
+  echo 3 > /tmp/t67-lsf-rc; sleep 1; RC_TRIES=1 tc67 backup >"$t67/b11.out" 2>&1 || true
+  grep -q 'REMOTE-ALERT.*ZERO kits' "$t67/b11.out" \
+    && ok "...and a destination that rclone says is not there still is" \
+    || no "missing destination: $(grep -E 'REMOTE-ALERT|ERROR' "$t67/b11.out" | tail -2 | tr '\n' '|')"
+  rm -f /usr/local/bin/rclone /tmp/t67-lsf-rc
 
   # o) a per-user file the account cannot read stops the run: 3.1.3 left one behind when
   # `remote set-path` ran under sudo, and passing over it would mean the default destination
   chown root:root "$h67/.config/timecrate/timecrate.conf"; chmod 600 "$h67/.config/timecrate/timecrate.conf"
   if tc67 status >"$t67/uc.out" 2>&1; then no "a per-user file the account cannot read was passed over in silence"
-  elif grep -q "sudo chown -h $u67: $h67/.config/timecrate/timecrate.conf" "$t67/uc.out"; then
+  elif grep -q "sudo chown -hR $u67: $h67/.config/timecrate\$" "$t67/uc.out"; then
     ok "a per-user file the account cannot read stops the run and names the fix"
   else no "unreadable per-user file: $(tail -1 "$t67/uc.out")"; fi
   tc67 help >/dev/null 2>&1 && ok "...and help still answers" || no "help died on the unreadable per-user file"
   chown "$u67:$u67" "$h67/.config/timecrate/timecrate.conf"
+  # ...and so does a folder the account cannot enter, which `init` under sudo left
+  m67="$(stat -c %a "$h67/.config/timecrate")"
+  chown root:root "$h67/.config/timecrate"; chmod 700 "$h67/.config/timecrate"
+  if tc67 status >"$t67/ud.out" 2>&1; then no "a settings folder the account cannot enter was passed over in silence"
+  elif grep -q "sudo chown -hR $u67: $h67/.config/timecrate\$" "$t67/ud.out"; then
+    ok "a settings folder the account cannot enter stops the run and names the fix"
+  else no "closed settings folder: $(tail -1 "$t67/ud.out")"; fi
+  chown "$u67:$u67" "$h67/.config/timecrate"; chmod "$m67" "$h67/.config/timecrate"
 
   # p) a file inside the keyring that root left closed to the account is named as that, where
   # GnuPG would report a key that is missing

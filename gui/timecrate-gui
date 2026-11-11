@@ -2849,7 +2849,10 @@ class Window(Adw.ApplicationWindow):
 
     def _on_status(self, ok, out):
         if not ok:
-            self.report("Cannot read status from %s. Is Timecrate installed?" % TC)
+            # the engine says why (a settings file an earlier release left closed to this
+            # account, say); whether it is installed is the question only when it said nothing
+            detail = self._clean(out.strip().splitlines()[-1]) if out.strip() else ""
+            self.report(detail or "Cannot read status from %s. Is Timecrate installed?" % TC)
             for row in (self.r_last, self.r_cloud, self.r_local, self.r_conf,
                         self.r_cipher, self.r_key, self.r_escrow, self.r_drill):
                 row.set_subtitle("unknown")

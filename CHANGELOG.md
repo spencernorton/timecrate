@@ -40,10 +40,16 @@ All notable changes to Timecrate are documented here.
 - **A changed destination is not a deletion.** The anti-rollback anchor records the destination
   it describes. Pointing the backups somewhere else — by command, in the window or by editing
   the file — starts a new count there, where it used to raise a deletion alert at the next
-  backup unless the change went through `remote set-path`.
+  backup unless the change went through `remote set-path`. A listing that fails is no longer
+  read as an empty destination either: the check says it could not look, where a network outage
+  at backup time used to raise the deletion alert.
 - **An upload is checked by content.** The stored copy's hash is compared with the kit's as well
   as its size, on every backend that reports one, and a copy that fails is removed and sent
-  again.
+  again. `RCLONE_IGNORE_CHECKSUM` turns the comparison off, as it does for rclone itself.
+- **A folder inside the destination is not a kit.** rclone lists one under any filter, and each
+  was counted in the anchor, swept by `verify --all` and the drill (which then failed), and
+  taken as proof that the kit just sent had arrived. Listings ask for files only, and a count
+  recorded by an earlier release is still read the way it was taken.
 - **The account is pinned with a command.** `sudo timecrate config set-user <login>` replaces
   the hand-edit of `/etc/timecrate/timecrate.conf` that a fresh install needed before its
   nightly backup could work. `status` and the window say when no account is pinned, and `init`
@@ -52,7 +58,8 @@ All notable changes to Timecrate are documented here.
   or clears a second copy. The Schedule page takes a daily time of your choosing and a pause of
   1, 3, 7 or 30 days; the main window shows a pause, and warns when scheduled runs are not tied
   to an account, with a button that fixes it. A change to only the schedule is now saved: it
-  was dropped when nothing else had changed. A warning from the engine no longer empties a view.
+  was dropped when nothing else had changed. A warning from the engine no longer empties a view,
+  and when the status cannot be read the window shows the engine's reason.
 - **The monthly drill fetches each kit once.** Its sweep now lists each archive after
   authenticating it, and the wrapper's separate `verify --all` pass is gone. With long
   retention that pass downloaded the whole archive a second time every month, under a one-hour
