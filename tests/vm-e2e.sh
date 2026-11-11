@@ -46,12 +46,15 @@ echo "S1: install the built packages"
 sudo apt-get update -qq >/dev/null 2>&1
 sudo apt-get install -y -qq ~/debs/timecrate_*_all.deb ~/debs/timecrate-gui_*_all.deb >/tmp/apt.log 2>&1 \
   && ok "timecrate + timecrate-gui installed" || { no "package install failed: $(tail -1 /tmp/apt.log)"; }
-command -v timecrate >/dev/null && [ "$(timecrate version)" = "timecrate 3.1.3" ] \
-  && ok "installed engine reports 3.1.3" || no "engine missing or wrong version"
+V="$(dpkg-deb -f ~/debs/timecrate_*_all.deb Version)"   # the package just installed, so a release bump needs no edit here
+command -v timecrate >/dev/null && [ "$(timecrate version)" = "timecrate $V" ] \
+  && ok "installed engine reports $V" || no "engine missing or wrong version"
 
 echo "S2: init creates the GPG and PQ identities"
 mkdir -p ~/e2e-data && printf 'marker %s\n' "$TOKEN" > ~/e2e-data/marker.txt
 printf 'home/ubuntu/e2e-data\n' > ~/e2e/include; printf '' > ~/e2e/exclude
+# a folder destination has to exist: since 3.2.0 a missing one stops the backup, as an unmounted drive must
+case "$REMOTE" in /*) mkdir -p "$REMOTE";; esac
 timecrate init >/tmp/init.log 2>&1 && [ -s ~/.config/timecrate/pq-secret.pem ] \
   && ok "init created GPG + ML-KEM-1024 keys" || no "init failed: $(tail -2 /tmp/init.log)"
 PQFPR="$(timecrate pq status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["fpr"])')"
