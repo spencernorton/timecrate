@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: timecrate
-Source: https://github.com/spencercnorton/timecrate
+Source: https://github.com/spencernorton/timecrate
 
 Files: *
 Copyright: 2026 Spencer Norton

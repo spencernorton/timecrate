@@ -1,3 +1,21 @@
+timecrate (3.2.0) resolute; urgency=high
+
+  * Security: root no longer acts on files in the configured account's home.
+    The per-user config is read as settings and never executed; rclone and
+    GnuPG on the account's keyring run as the account; status, history and
+    the anti-rollback anchor are read and written as the account; and what
+    /etc/timecrate.env sets no longer reaches those processes, RCLONE_*
+    excepted.
+  * A folder on this machine is a destination (remote set-path <folder>);
+    new remote list and remote set-mirror.
+  * New config set-user and config get; status reports an unpinned account.
+  * The monthly drill lists each archive it authenticates, and its wrapper
+    no longer downloads the whole archive a second time.
+  * The window: folder and rclone-remote destinations, a second copy, a
+    daily time, pause, and a schedule-only change is no longer dropped.
+
+ -- Norvi <apt@globalentry.systems>  Wed, 11 Nov 2026 06:00:00 +0000
+
 timecrate (3.1.3) resolute; urgency=medium
 
   * The drill, capstone and overnight wrappers no longer export the system

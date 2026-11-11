@@ -4,6 +4,53 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.2.0 — 2026-11-11
+
+- **Root no longer acts on files in the account's home (security).** The engine runs as root
+  for one account. Until now it sourced that account's `~/.config/timecrate/timecrate.conf` as
+  a shell script, ran rclone and GnuPG as root on the account's own configuration — both can
+  name a program to start — and wrote its status files as root inside the account's home. So
+  anything able to write those files as the account could run as root at the next scheduled
+  backup, or have root read or overwrite a file of its choosing. Now the per-user file is read
+  as a list of settings and never executed; rclone, and GnuPG on the account's keyring, run as
+  the account; status, history and the anti-rollback anchor are read and written as the account;
+  and a kit passes between root's staging directory and those processes as a stream, never as a
+  path. Kits are unchanged: every kit already on a remote reads exactly as before.
+- **What that changes on an existing machine.**
+  - The per-user file takes only the destination, the second copy, the kit posture, retention,
+    the size rails, compression and the git watch list. Anything else there is ignored with a
+    warning — set it in `/etc/timecrate/timecrate.conf`. `timecrate config` lists what is taken.
+  - What `/etc/timecrate.env` sets no longer reaches rclone, except names starting with
+    `RCLONE_`. A credential rclone needs goes in the account's rclone configuration, or in that
+    file as `RCLONE_CONFIG_<REMOTE>_<OPTION>`.
+  - A key store or state directory that an earlier release left owned by root is no use to the
+    account. The state directory is handed back on the first run; for a key store the error
+    names the command (`sudo chown -hR <account>: ~/.config/timecrate`).
+  - `init`, `import-key`, `export-key`, `pq`, `escrow-doc`, `keys` and `remote` run as the
+    account even under `sudo`, so they no longer leave root-owned files behind.
+- **A folder is a destination.** `timecrate remote set-path /media/you/drive/TIMECRATE` sends
+  the kits to an attached drive, a mounted share or a folder another program syncs. The folder
+  must exist and be writable by the account, a drive that is not mounted stops the backup
+  instead of being replaced by a directory, and a destination inside the backed-up tree is left
+  out of the kits. `remote list` shows the remotes rclone already has, any of which can be a
+  destination, and `remote set-mirror <remote:path>|<folder>|off` sets or clears the second copy.
+- **The account is pinned with a command.** `sudo timecrate config set-user <login>` replaces
+  the hand-edit of `/etc/timecrate/timecrate.conf` that a fresh install needed before its
+  nightly backup could work. `status` and the window say when no account is pinned, and `init`
+  ends by naming the command. `timecrate config get <NAME>` prints one resolved setting.
+- **The window.** The Remote page takes a folder or any rclone remote the account has, and sets
+  or clears a second copy. The Schedule page takes a daily time of your choosing and a pause of
+  1, 3, 7 or 30 days; the main window shows a pause, and warns when scheduled runs are not tied
+  to an account, with a button that fixes it. A change to only the schedule is now saved: it
+  was dropped when nothing else had changed.
+- **The monthly drill fetches each kit once.** Its sweep now lists each archive after
+  authenticating it, and the wrapper's separate `verify --all` pass is gone. With long
+  retention that pass downloaded the whole archive a second time every month, under a one-hour
+  limit it would eventually have outgrown. A failed drill's alert carries the drill's reason.
+- A pause is written and read back as the account, and refused if it cannot be: a pause that
+  `status` cannot see is backups stopping behind a healthy screen.
+- `timecrate help` lists `backup --force`; the project links point at the current repository.
+
 ## 3.1.3 — 2026-11-02
 
 - **The monthly drill checks the remote your backups use.** The drill, capstone and overnight
