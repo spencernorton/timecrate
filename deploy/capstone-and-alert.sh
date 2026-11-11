@@ -230,8 +230,9 @@ command -v multipass >/dev/null 2>&1 || fail "multipass not installed"
 command -v runuser   >/dev/null 2>&1 || fail "runuser not available (needed to drop to $TC_USER)"
 [ -n "$USER_HOME" ] && [ -d "$USER_HOME" ] || fail "cannot resolve a home for TC_USER=$TC_USER"
 [ -r "$CONF/timecrate-secret.asc" ] || fail "no escrowed secret key at $CONF/timecrate-secret.asc"
-# a folder destination (an attached drive, a NAS mount) needs no rclone config at all
-case "$REMOTE" in /*) ;; *) [ -r "$RCONF" ] || fail "no rclone config at $RCONF";; esac
+# a folder destination (an attached drive, a NAS mount) needs no rclone config at all, and must
+# not open one: a config that is password-encrypted would stop the fetch to ask for it
+case "$REMOTE" in /*) RCONF=/dev/null;; *) [ -r "$RCONF" ] || fail "no rclone config at $RCONF";; esac
 
 # Resolve the in-VM script ONCE, from a candidate list, and require it to exist. The previous
 # version chained transfers and trusted their exit codes; this decides the source up front so a

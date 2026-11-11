@@ -207,7 +207,8 @@ count at both ends first and warns when the current path holds backups the new o
 are neither moved nor deleted. The previous configuration is kept alongside as \fI.bak\fR.
 A folder must exist and be writable by the configured account. It is never created on the way to
 a backup: a drive that is not mounted stops the run, instead of being replaced by a directory on
-the disk the backup is meant to survive. A destination folder is left out of the kits.
+the disk the backup is meant to survive. The kits in a destination folder are left out of later
+kits; anything else in that folder is backed up as usual.
 .TP
 .B set-mirror " \fIremote:path\fR|\fIfolder\fR|\fBoff\fR [\fB\-\-yes\fR]"
 Send a second copy of every new kit somewhere else
@@ -388,7 +389,8 @@ Kits are materialised and verified before anything is extracted, never streamed 
 .BR tar .
 .TP
 .B Anti\-rollback
-Each upload records the expected newest kit and count. Restoring anything older needs
+Each upload records the expected newest kit and count, and the destination they are for: a
+changed destination starts a new count. Restoring anything older needs
 .BR \-\-force ,
 and the backup and drill both alert on unexpected deletion or rollback on the remote \(em an old
 kit carries a perfectly valid signature, so signing alone cannot catch this.

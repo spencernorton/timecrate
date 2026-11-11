@@ -216,24 +216,29 @@ def write_user_config(values):
     return path
 
 
-def run_async(argv, on_done):
+def run_async(argv, on_done, parsed=False):
     """Run a command off the main loop. Calls on_done(ok, output).
 
     Everything this window renders comes through here. It used to be two blocking subprocess.run
     calls with 40-second timeouts, on the GTK main loop - so a slow remote froze the entire
     window for up to eighty seconds with no way to tell that from a crash.
+
+    parsed: the caller reads the output as data (JSON, a list). The engine's warnings go to
+    stderr, and on one pipe a single warning ahead of a JSON document emptied every view, so
+    for these they are kept apart; a failure still reports its reason, which is on stderr.
     """
     try:
-        proc = Gio.Subprocess.new(
-            argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
+        proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | (
+            Gio.SubprocessFlags.STDERR_PIPE if parsed else Gio.SubprocessFlags.STDERR_MERGE))
     except GLib.Error as exc:
         GLib.idle_add(on_done, False, exc.message)
         return
 
     def finished(process, result):
         try:
-            _ok, out, _err = process.communicate_utf8_finish(result)
-            on_done(process.get_successful(), out or "")
+            _ok, out, err = process.communicate_utf8_finish(result)
+            ok = process.get_successful()
+            on_done(ok, (out or "") if ok else (out or "") + (err or ""))
         except GLib.Error as exc:
             on_done(False, exc.message)
 
@@ -489,7 +494,7 @@ class SettingsDialog(Adw.PreferencesDialog):
                 self.alert_row.set_subtitle(
                     "journal only — a failure is written to the system journal and sent nowhere else")
 
-        run_async([TC, "alerts", "--json"], done)
+        run_async([TC, "alerts", "--json"], done, parsed=True)
 
     def _test_alert(self):
         dialog = Adw.AlertDialog(
@@ -564,7 +569,7 @@ class SettingsDialog(Adw.PreferencesDialog):
                     row.set_selected(len(choices))
             self._schedule_baseline = self._schedule_keys()
 
-        run_async([TC, "schedule"], done)
+        run_async([TC, "schedule"], done, parsed=True)
 
     def _sync_time_row(self):
         row, choices = self.schedule_rows["backup"]
@@ -915,7 +920,7 @@ def choose_rclone_remote(window, on_name):
         window._remote_dialog = dialog      # kept so the smoke test can inspect it
         dialog.present(window)
 
-    run_async([TC, "remote", "list", "--json"], done)
+    run_async([TC, "remote", "list", "--json"], done, parsed=True)
 
 
 class FolderPicker(Adw.Dialog):
@@ -1010,7 +1015,7 @@ class FolderPicker(Adw.Dialog):
                 row.connect("activated", lambda _r, n=name: self._enter(n))
                 self.group.add(row)
 
-        run_async([TC, "remote", "browse", self.path, "--json"], done)
+        run_async([TC, "remote", "browse", self.path, "--json"], done, parsed=True)
 
     def rows(self):
         child = self.group.get_first_child()
@@ -1152,7 +1157,7 @@ class CoverageDialog(Adw.Dialog):
                     group.add(Adw.ActionRow(title="… and %d more not shown" % (len(rows) - 60)))
                 self.page.add(group)
 
-        run_async([TC, "coverage", "--json"], done)
+        run_async([TC, "coverage", "--json"], done, parsed=True)
 
     def _groups(self):
         out, w = [], self.page.get_first_child()
@@ -1250,7 +1255,7 @@ class PathsEditor(Adw.Dialog):
                 row.add_suffix(remove)
                 self.group.add(row)
 
-        run_async([TC, "paths", self.which, "list"], done)
+        run_async([TC, "paths", self.which, "list"], done, parsed=True)
 
     def _choose(self):
         dialog = Gtk.FileDialog()
@@ -1394,7 +1399,7 @@ class RemotePage(Adw.PreferencesPage):
                 return
             self._render()
 
-        run_async([TC, "remote", "status", "--json"], done)
+        run_async([TC, "remote", "status", "--json"], done, parsed=True)
 
     def _render(self):
         d, w = self.info, self.window
@@ -1736,7 +1741,7 @@ class KeysPage(Adw.PreferencesPage):
                 return
             self._render()
 
-        run_async([TC, "keys", "--json"], done)
+        run_async([TC, "keys", "--json"], done, parsed=True)
 
     def _render(self):
         k = self.keys
@@ -2798,7 +2803,7 @@ class Window(Adw.ApplicationWindow):
             self._first_run_shown = True
             self._first_run()
 
-        run_async([TC, "keys", "--json"], done)
+        run_async([TC, "keys", "--json"], done, parsed=True)
 
     def _first_run(self):
         dialog = Adw.AlertDialog(
@@ -2837,9 +2842,9 @@ class Window(Adw.ApplicationWindow):
         dialog.present(self)
 
     def refresh(self):
-        run_async([TC, "status", "--json"], self._on_status)
-        run_async([TC, "list", "--long"], self._on_kits)
-        run_async([TC, "history", "--json"], self._on_history)
+        run_async([TC, "status", "--json"], self._on_status, parsed=True)
+        run_async([TC, "list", "--long"], self._on_kits, parsed=True)
+        run_async([TC, "history", "--json"], self._on_history, parsed=True)
         self._check_keys()
 
     def _on_status(self, ok, out):

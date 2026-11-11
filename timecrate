@@ -130,7 +130,14 @@ user_write(){
 TC_USER_KEYS="TIMECRATE_REMOTE TIMECRATE_REMOTE2 TIMECRATE_CRYPTO TIMECRATE_KEEP TIMECRATE_KEEP_MONTHLY TIMECRATE_KEEP_YEARLY TIMECRATE_MIN_MB TIMECRATE_MAX_MB TIMECRATE_ZSTD_LEVEL TIMECRATE_ZSTD_LONG TIMECRATE_GIT_WATCH"
 _tc_read_user_conf(){
   local text kind val
-  text="$(as_user cat -- "$1" 2>/dev/null)" || return 0
+  if ! text="$(as_user cat -- "$1" 2>/dev/null)"; then
+    # No such file is the ordinary case. One that is there and closed to the account is what a
+    # release before 3.2.0 left when `remote set-path` ran under sudo, and reading on without it
+    # would send tonight's kit wherever the defaults point, in the default posture.
+    as_user test -e "$1" || return 0
+    case "${2:-}" in help|-h|--help|version|--version) return 0;; esac
+    die "$1 cannot be read by $TC_USER, so the settings in it (where the backups go, for one) would be ignored. Hand it back with:  sudo chown -h $TC_USER: $1"
+  fi
   TC_CONF_SOURCES="${TC_CONF_SOURCES:+$TC_CONF_SOURCES }$1"
   while IFS= read -r -d '' kind && IFS= read -r -d '' val; do
     if [ "$kind" = set ]; then export "${val?}"; else warn "$1: $val"; fi
@@ -176,7 +183,7 @@ for no, line in enumerate(sys.stdin.read().splitlines(), 1):
 ' || true)
 }
 USER_CONF="${TIMECRATE_USER_CONF:-$USER_HOME/.config/timecrate/timecrate.conf}"
-_tc_read_user_conf "$USER_CONF"
+_tc_read_user_conf "$USER_CONF" "${1:-help}"
 _tc_env_restore "${_TC_ENV[@]:-}"
 
 CONF_DIR="${TIMECRATE_CONF:-$USER_HOME/.config/timecrate}"
@@ -333,9 +340,10 @@ rc(){
     *:*) named=1;;
   esac; done
   [ -n "${TC_RC_CONF:-}" ] && conf="$TC_RC_CONF"
-  # Only folders named and no config file, which is all a folder destination needs: say so, or
-  # rclone reports "Config file ... not found" on every call. Never for `config`, which makes it.
-  [ "$named" = 1 ] || [ -e "$conf" ] || case " $* " in *" config "*) ;; *) conf=/dev/null;; esac
+  # Only folders named: no config file is needed, so none is opened. Otherwise rclone reports
+  # "Config file ... not found" on every call, or stops to ask for the password of a config it
+  # has no use for. Never for `config`, which reads or makes the file.
+  [ "$named" = 1 ] || case " $* " in *" config "*) ;; *) conf=/dev/null;; esac
   as_user rclone --config "$conf" "$@"
 }
 # A kit crosses that line as a stream. Staging is root's and closed to the account, so rclone
@@ -349,11 +357,28 @@ rc_put(){   # <local file> <remote path>
   for n in 1 2 3; do
     # --size: a backend that cannot take a stream of unknown length need not spool it to disk first
     if rc rcat --size "$size" "$dst" < "$src" \
-       && [ "$(rc lsf --format s "$dst" 2>/dev/null | head -1 || true)" = "$size" ]; then return 0; fi
+       && [ "$(rc lsf --format s "$dst" 2>/dev/null | head -1 || true)" = "$size" ] \
+       && rc_same_hash "$src" "$dst"; then return 0; fi
     [ "$n" -ge "${RC_TRIES:-3}" ] && break
     warn "upload of $(basename "$src") did not complete (attempt $n) — retrying"; sleep $(( n * 10 ))
   done
+  # what is under that name is not the file: leave nothing there for a listing to take for it
+  rc deletefile "$dst" >/dev/null 2>&1 || true
   return 1
+}
+# rclone hash-checks a file it copies, but not a stream of known size, so the stored copy's hash
+# is asked for and compared here. Only a hash the backend reports can disagree: where it keeps
+# none of these, the size check stands alone, as it would for rclone itself.
+rc_same_hash(){   # <local file> <remote path>
+  local t there here
+  for t in md5 sha1 dropbox quickxor; do
+    there="$(rc hashsum "$t" "$2" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+    case "$there" in ''|*[^0-9a-f]*) continue;; esac
+    here="$(rc hashsum "$t" - < "$1" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+    case "$here" in ''|*[^0-9a-f]*) continue;; esac
+    [ "$there" = "$here" ]; return
+  done
+  return 0
 }
 rc_get(){   # <remote path> <local file>
   local src="$1" dst="$2" n
@@ -463,10 +488,11 @@ adopt_state(){
     [ "$(pwd -P)" = "$STATE_DIR" ] || exit 0
     st="$(stat -c '%u %a' . 2>/dev/null)" || exit 0
     [ "${st%% *}" = 0 ] && [ "$(( 8#${st##* } & 0022 ))" -eq 0 ] || exit 0
+    own="$TC_USER:$(id -gn "$TC_USER" 2>/dev/null || true)"   # by name: not every chown reads "user:" as its group
     for f in status.json log expected expected2 paused; do
-      if [ -f "$f" ] && [ ! -L "$f" ]; then chown -h -- "$TC_USER:" "$f"; fi
+      if [ -f "$f" ] && [ ! -L "$f" ]; then chown -h -- "$own" "$f"; fi
     done
-    chown -h -- "$TC_USER:" . ) || true
+    chown -h -- "$own" . ) || true
 }
 
 ensure_staging(){
@@ -687,9 +713,14 @@ build_exclude(){
   for p in "$CONF_DIR" "$RCLONE_CONF" "$STAGING_ROOT" "$USER_HOME/.config/time-machine"; do
     [ -n "$p" ] && printf '%s\n' "${p#/}"
   done
-  # a destination that is a folder on this machine: last night's kits are not tonight's data
+  # a destination that is a folder on this machine: last night's kits are not tonight's data.
+  # Only the kits: whatever else that folder holds is backed up like any other
+  local q
   for p in "$REMOTE" "$REMOTE2"; do
-    case "$p" in /*) printf '%s\n' "${p#/}";; esac
+    case "$p" in /*)
+      q="$(printf '%s' "${p#/}" | sed 's/[][*?\\]/\\&/g')"   # the folder's name is not a pattern
+      printf '%s\n' "$q/${PREFIX}-*" "$q/${LEGACY_PREFIX}-*";;
+    esac
   done
 }
 
@@ -771,7 +802,7 @@ write_status(){
   fi
   nloc="$(find "$STAGING_ROOT" -maxdepth 1 -name "${PREFIX}-*.tar.zst.gpg" 2>/dev/null | wc -l | tr -d ' ' || true)"
   local exp_latest="" exp_count=0 anchor
-  if anchor="$(user_line "$STATE_DIR/expected")"; then read -r exp_latest exp_count _ <<< "$anchor" || true; fi
+  if anchor="$(anchor_for expected "$REMOTE")"; then read -r exp_latest exp_count _ <<< "$anchor" || true; fi
   # built by python3 (already required by `status`) — a path or remote containing a quote would
   # silently emit invalid JSON through printf, and the GUI would render "status unavailable"
   local json
@@ -1214,8 +1245,8 @@ cmd_backup(){
 
   if [ $upload = 1 ]; then
     # deletion/rollback check BEFORE this upload advances the anchor — daily, not monthly
-    check_remote_anchor "$REMOTE" "$STATE_DIR/expected"
-    [ -z "$REMOTE2" ] || check_remote_anchor "$REMOTE2" "$STATE_DIR/expected2"
+    check_remote_anchor "$REMOTE" expected
+    [ -z "$REMOTE2" ] || check_remote_anchor "$REMOTE2" expected2
     log "uploading to $REMOTE (checked on the remote before the local copy goes)…"
     require_remote
     rc_put "$kit"  "$REMOTE/$(basename "$kit")"  || die "upload FAILED — kit kept locally: $kit"
@@ -1242,12 +1273,12 @@ cmd_backup(){
     local ecount
     ecount="$(rc lsf "$REMOTE" --include "$KIT_GLOB" 2>/dev/null | wc -l | tr -d ' ' || true)"
     as_user mkdir -p "$STATE_DIR" 2>/dev/null || true
-    printf '%s %s\n' "$(basename "$kit")" "${ecount:-0}" | user_write "$STATE_DIR/expected" 2>/dev/null \
+    printf '%s %s %s\n' "$(basename "$kit")" "${ecount:-0}" "$REMOTE" | user_write "$STATE_DIR/expected" 2>/dev/null \
       || warn "could not record the anti-rollback anchor ($STATE_DIR/expected)"
     if [ -n "$REMOTE2" ]; then
       local ecount2
       ecount2="$(rc lsf "$REMOTE2" --include "$KIT_GLOB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-      printf '%s %s\n' "$(basename "$kit")" "${ecount2:-0}" | user_write "$STATE_DIR/expected2" 2>/dev/null || true
+      printf '%s %s %s\n' "$(basename "$kit")" "${ecount2:-0}" "$REMOTE2" | user_write "$STATE_DIR/expected2" 2>/dev/null || true
     fi
     rm -f "$kit" "$sha" "$meta"     # no local copies retained
     log "uploaded + verified on remote${REMOTE2:+ + mirrored to $REMOTE2} + local kit pruned."
@@ -1271,6 +1302,22 @@ cmd_backup(){
   log "backup complete."
 }
 
+# The anchor in state file $1 (expected | expected2) as "<newest kit> <count>", but only if it
+# describes destination $2. Since 3.2.0 the destination is the rest of the line. An anchor from
+# before names none, and is taken to describe the one the same run recorded in status.json. So a
+# destination changed by any means (set-path, the window, an edited file) starts a new count
+# instead of reading as every kit deleted.
+anchor_for(){
+  local line kit="" count="" dest=""
+  line="$(user_line "$STATE_DIR/$1")" || return 1
+  read -r kit count dest <<< "$line" || true
+  [ -n "$dest" ] || dest="$(user_cat "$STATE_DIR/status.json" | python3 -c '
+import json, sys
+try: print(json.load(sys.stdin).get(sys.argv[1]) or "")
+except Exception: pass' "remote${1#expected}" 2>/dev/null || true)"
+  [ -z "$dest" ] || [ "$dest" = "$2" ] || return 1
+  printf '%s %s' "$kit" "$count"
+}
 # Compare a remote's CURRENT state against its recorded anchor ($2) and warn loudly on
 # deletion/rollback. Runs at every BACKUP (daily) — the anchor is rebaselined right after, so
 # this is the only window where an external deletion is still visible; a monthly-only check
@@ -1279,9 +1326,9 @@ cmd_backup(){
 # pages on. Kits are compared by timestamp, so an anchor written before 3.0.0 (a previous-name kit)
 # reads correctly against a newer kit of either name.
 check_remote_anchor(){
-  local remote="$1" anchor="$2"
+  local remote="$1" anchor
   local exp_l="" exp_c="" listing cur_l cur_c out=""
-  anchor="$(user_line "$anchor")" || return 0
+  anchor="$(anchor_for "$2" "$remote")" || return 0
   read -r exp_l exp_c _ <<< "$anchor" || true
   listing="$(rc lsf "$remote" --include "$KIT_GLOB" 2>/dev/null | kit_sort || true)"
   cur_l="$(printf '%s\n' "$listing" | tail -1)"
@@ -1414,7 +1461,7 @@ cmd_restore(){
   # anti-rollback: an OLD kit is validly signed, so the signature gate cannot catch an attacker
   # (or a confused operator) restoring stale data. Compare against the recorded expected-latest.
   local exp="" kb anchor
-  if anchor="$(user_line "$STATE_DIR/expected")"; then
+  if anchor="$(anchor_for expected "$REMOTE")"; then
     read -r exp _ <<< "$anchor" || true; kb="$(basename "$kit")"
     # only canonical kit names carry a comparable timestamp — a hand-renamed --local file
     # (kit.gpg etc.) must not false-trigger the guard and train the operator to reach for --force
@@ -1700,6 +1747,7 @@ cmd_status(){
   local drillres; drillres="$(journalctl -u timecrate-drill.service -n 20 --no-pager 2>/dev/null | grep -oE 'RECOVERY DRILL (PASSED|FAILED)' | tail -1 || true)"
   KITS="$kits" CBYTES="$cbytes" ABOUT="$about" NEXTDRILL="$nextdrill" DRILLRES="$drillres" \
   PAUSED="$(pause_active || true)" STORED="$stored" PINNED="$TC_USER_PINNED" \
+  LIVE_REMOTE="$REMOTE" LIVE_REMOTE2="$REMOTE2" \
   python3 - "${1:-}" <<'PY'
 import sys,json,os
 mode=sys.argv[1] if len(sys.argv)>1 else ""
@@ -1710,6 +1758,8 @@ if not isinstance(d, dict): d={}
 # live as well: is the account this acts for written down, or only inferred from who is asking?
 # The nightly timer has nobody asking, so unpinned it runs as root and finds no keys.
 d["user_pinned"]=os.environ.get("PINNED")=="1"
+# live as well: where the next backup goes. The stored half says where the last one went.
+d["remote"]=os.environ.get("LIVE_REMOTE",""); d["remote2"]=os.environ.get("LIVE_REMOTE2","")
 d["cloud_kits"]=os.environ.get("KITS","")
 d["cloud_bytes"]=os.environ.get("CBYTES","")
 # live, never from the stored file: a lapsed pause must stop being one the moment it lapses
@@ -2199,7 +2249,7 @@ cmd_recovery_drill(){
     # total wipe is the WORST deletion case — diagnose it, never say "run a backup first"
     # (a fresh backup would rebaseline the anchor and destroy the evidence while the provider's
     # version history keeps expiring)
-    local was; if was="$(user_line "$STATE_DIR/expected")"; then
+    local was; if was="$(anchor_for expected "$REMOTE")"; then
       die "REMOTE DELETION: 0 kits on $REMOTE but the last backup recorded $was — recover them from the provider's version history NOW, and do NOT run a backup first"
     fi
     die "no kit on $REMOTE to drill against — run a backup first"
@@ -2251,7 +2301,7 @@ cmd_recovery_drill(){
   # the remote must still hold what the last backup recorded — an attacker deleting kits (or
   # re-uploading old ones) is invisible to per-kit signature checks, every old kit signs clean
   local anchor
-  if anchor="$(user_line "$STATE_DIR/expected")"; then
+  if anchor="$(anchor_for expected "$REMOTE")"; then
     # NB: a negative subscript into an empty array is FATAL under set -u (':-' does not save
     # it) — guard nkits; an empty listing is itself a deletion signal handled by the count check
     local exp_latest="" exp_count="" newest=""
@@ -2307,7 +2357,7 @@ cmd_recovery_drill(){
   log "remote sweep: $nkits kits, $nver signature-verified and listed${badkits:+, BAD: $badkits}"
   # the mirror is anchor-checked (newest + count vs what the last backup recorded) — enough to
   # catch a wiped/rotted REMOTE2 that per-backup mirror verification can never see
-  if [ -n "$REMOTE2" ] && anchor="$(user_line "$STATE_DIR/expected2")"; then
+  if [ -n "$REMOTE2" ] && anchor="$(anchor_for expected2 "$REMOTE2")"; then
     local l2 n2 e2l="" e2c=""
     l2="$(rc lsf "$REMOTE2" --include "$KIT_GLOB" 2>/dev/null | kit_sort || true)"
     n2="$(printf '%s\n' "$l2" | grep -c . || true)"
@@ -2738,7 +2788,7 @@ dest_check(){
 remote_conf_facts(){
   local name="${TC_RNAME:-$(remote_name)}"
   [ -n "$name" ] || return 0
-  rc config dump 2>/dev/null | TC_RNAME="$name" python3 -c '
+  rc --ask-password=false config dump </dev/null 2>/dev/null | TC_RNAME="$name" python3 -c '
 import json, os, sys
 try:
     conf = json.load(sys.stdin)
@@ -3271,6 +3321,11 @@ keyring_blocker(){
   if [ -d "$GNUPGHOME_TC" ] && ! { as_user test -r "$GNUPGHOME_TC" && as_user test -x "$GNUPGHOME_TC"; }; then
     printf '%s' "$GNUPGHOME_TC"; return 0
   fi
+  # ...and a file inside the keyring that root wrote before 3.2.0: GnuPG reports that as a key
+  # that is missing, not as a file it may not read. An agent's socket and the seed cache are not keys.
+  if [ -d "$GNUPGHOME_TC" ]; then
+    as_user find "$GNUPGHOME_TC" ! -type s ! -name random_seed ! -readable -print -quit 2>/dev/null || true
+  fi
   return 0
 }
 keyring_readable(){ [ -z "$(keyring_blocker)" ]; }
@@ -3554,7 +3609,8 @@ cmd_export_key(){
          done < <(build_include);;
     esac
     umask 077
-    gpg_tc --armor --export-secret-keys "$fpr" > "$out" || die "export failed"
+    gpg_tc --armor --export-secret-keys "$fpr" > "$out" \
+      || die "export failed — the file is written as $(id -un), under sudo too: choose a place that account can write"
     chmod 600 "$out"
     log "secret key $fpr written to $out — move it OFF this machine, then '$SELF escrow-confirm'."
   else
@@ -3619,6 +3675,7 @@ print(json.dumps({
 
 # ============================ dispatch ============================
 cmd="${1:-help}"; shift || true
+adopt_state
 # The commands that work on the account's own keys, sign-ins and settings run AS the account even
 # when root starts them. Under sudo they used to leave a root-owned key store in its home, which
 # the account could then neither read nor replace.
@@ -3626,10 +3683,12 @@ case "$cmd" in init|import-key|import|verify-key|export-key|pq|escrow-doc|keys|r
   if [ "$TC_DROP" = 1 ]; then
     # keep the caller's directory when the account can use it (a relative --out, a key file)
     ( exec "${TC_AS_ENV[@]}" "${TC_AS_ID[@]}" test -r . -a -x . ) 2>/dev/null || cd /
-    exec "${TC_AS_ENV[@]}" "TIMECRATE_USER=$TC_USER" "${TC_AS_ID[@]}" "$(readlink -f "$0")" "$cmd" "$@"
+    # the account stays the one resolved here, and one that is not pinned stays that way, so
+    # `init` can still end by saying so
+    pin=(); [ "$TC_USER_PINNED" != 1 ] || pin=("TIMECRATE_USER=$TC_USER")
+    exec "${TC_AS_ENV[@]}" ${pin[@]+"${pin[@]}"} "${TC_AS_ID[@]}" "$(readlink -f "$0")" "$cmd" "$@"
   fi;;
 esac
-adopt_state
 case "$cmd" in
   init) cmd_init "$@";;  harden) need_root harden; cmd_harden "$@";;
   backup) cmd_backup "$@";;  restore) cmd_restore "$@";;

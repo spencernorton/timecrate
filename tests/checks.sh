@@ -679,16 +679,24 @@ probe_unreadable(){
     && ok "unreadable $1 is diagnosed, not read as 'no key'" \
     || no "unreadable $1 was NOT diagnosed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
 }
+# Each probe below has to fail for its own reason, and the files inside the keyring are probed
+# too since 3.2.0: for uid 1 they are closed (root's keyring), so open them for the moment.
+perm25="$(find /tmp/tm/conf/gnupg ! -type s -printf '%m\t%p\n')"
+chmod -R a+rX /tmp/tm/conf/gnupg
 # listable but not traversable: -r passes and every file inside is still unopenable
 chmod 644 /tmp/tm/conf; probe_unreadable "CONF_DIR (r but not x)"; chmod 755 /tmp/tm/conf
 # a traversable CONF_DIR holding a root-only recipients.txt -- what a root-run init leaves, one level down
 chmod 600 /tmp/tm/conf/recipients.txt; probe_unreadable "recipients.txt"; chmod 644 /tmp/tm/conf/recipients.txt
 # ...and the keyring itself, which reports a key with no secret half rather than no key at all
 chmod 700 /tmp/tm/conf/gnupg; probe_unreadable "GNUPGHOME"; chmod 755 /tmp/tm/conf/gnupg
-# with all three readable it must go back to reporting the key, or the probe is just always-true
+# with all of it readable it must go back to reporting the key, or the probe is just always-true
 setpriv --reuid=1 --regid=1 --clear-groups "$TC" keys 2>&1 | grep -q 'UNREADABLE' \
   && no "keyring still reported UNREADABLE after the permissions were restored" \
   || ok "a genuinely readable key store is not reported as unreadable"
+while IFS=$'\t' read -r m25 p25; do chmod "$m25" "$p25"; done <<< "$perm25"
+# ...and a file inside the keyring, which GnuPG reports as a key that is missing: the keyring as
+# it stood, with only its directories open to uid 1
+probe_unreadable "a file inside the keyring"
 
 echo "== T26: the intended root-on-user-keyring ownership is not warned about forever =="
 # gpg calls root-reading-a-user-keyring "unsafe ownership" on every run. That is the NORMAL case
@@ -3110,7 +3118,7 @@ else
   mkdir -p "$t67/etc" "$t67/dest2" "$t67/rs/timecrate"
   chmod 755 "$t67" "$t67/etc" "$t67/dest2" "$t67/rs" "$t67/rs/timecrate"; chown "$u67:" "$t67/dest2"
   # the destination sits INSIDE the backed-up tree on purpose: a folder another program syncs
-  as67 mkdir -p "$h67/docs/kits"; as67 sh -c "head -c 300000 /dev/urandom > '$h67/docs/a.bin'"
+  as67 mkdir -p "$h67/docs/kits"; as67 sh -c "head -c 300000 /dev/urandom > '$h67/docs/a.bin'; echo keep67 > '$h67/docs/kits/note.txt'"
   printf 'etc/hostname\n~/docs\n' > "$t67/etc/include"; printf '*.cache\n' > "$t67/etc/exclude"
   printf 'TIMECRATE_MIN_MB=0\nTIMECRATE_KEEP=3\n' > "$t67/etc/timecrate.conf"
   printf 'T67_ALERT_TOKEN=sekret-67\nRCLONE_TPSLIMIT=7\n' > "$t67/etc/timecrate.env"
@@ -3205,9 +3213,12 @@ EOF
   ext67="$(find "$t67/staging" -type d -path "*extracted$h67/docs" 2>/dev/null | head -1)"
   [ -n "$ext67" ] && cmp -s "$ext67/a.bin" "$h67/docs/a.bin" \
     && ok "restore fetches, authenticates and extracts it" || no "restore: $(tail -2 "$t67/r.out" | tr '\n' '|')"
-  [ -n "$ext67" ] && [ ! -e "$ext67/kits" ] \
-    && ok "a destination folder inside the backed-up tree is left out of the kit" \
+  [ -n "$ext67" ] && [ -z "$(find "$ext67/kits" -name 'time*' 2>/dev/null | head -1)" ] \
+    && ok "the kits in a destination folder inside the backed-up tree are left out of the next one" \
     || no "last night's kits were archived into tonight's: $(ls "$ext67/kits" 2>/dev/null | head -2 | tr '\n' ' ')"
+  [ "$(cat "${ext67:-/nonexistent}/kits/note.txt" 2>/dev/null)" = keep67 ] \
+    && ok "...and only the kits: what else that folder holds is backed up" \
+    || no "a file beside the kits in the destination folder was left out of the backup"
   tc67 recovery-drill >"$t67/d.out" 2>&1 && grep -q 'RECOVERY DRILL PASSED' "$t67/d.out" \
     && grep -Eq 'remote sweep: ([0-9]+) kits, \1 signature-verified and listed$' "$t67/d.out" \
     && ok "the drill passes, and its sweep lists every archive it authenticates" \
@@ -3292,6 +3303,87 @@ STUB
     && ok "the drill alert says why the drill failed" || no "drill alert: $(head -c 300 "$t67/w/alert.body" 2>/dev/null)"
   [ "$(cat "$t67/w/bin/calls" 2>/dev/null)" = recovery-drill ] \
     && ok "...from one pass: the wrapper calls the engine once" || no "the wrapper called the engine: $(tr '\n' '|' < "$t67/w/bin/calls" 2>/dev/null)"
+
+  # l) a folder destination never opens the account's rclone config: one that is
+  # password-encrypted would stop every call to ask for a password it has no use for
+  as67 sh -c "{ printf '# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\n'; head -c 60 /dev/zero | base64 -w0; echo; } > '$h67/.config/rclone/rclone.conf'"
+  [ "$(tc67 list 2>/dev/null </dev/null | grep -c 'tar\.zst\.gpg')" -ge 1 ] \
+    && ok "a folder destination works beside an rclone config that is password-encrypted" \
+    || no "folder destination beside an encrypted rclone config: $(tc67 list 2>&1 </dev/null | tail -1)"
+  as67 rm -f "$h67/.config/rclone/rclone.conf"
+
+  # m) status says where the next backup goes, and an anchor says which destination it describes
+  grep -q " $h67/docs/kits\$" "$s67/expected" && grep -q " $t67/dest2\$" "$s67/expected2" \
+    && ok "each anchor records the destination it describes" \
+    || no "anchors: $(cat "$s67/expected" "$s67/expected2" 2>&1 | tr '\n' '|')"
+  as67 mkdir -p "$h67/kits2"
+  as67 sed -i "s#^TIMECRATE_REMOTE=.*#TIMECRATE_REMOTE=$h67/kits2#" "$h67/.config/timecrate/timecrate.conf"
+  [ "$(tc67 status --json 2>/dev/null | j67 remote)" = "$h67/kits2" ] \
+    && ok "status reports the destination in effect, not the one the last backup used" \
+    || no "status remote: $(tc67 status --json 2>/dev/null | j67 remote)"
+  sleep 1; tc67 backup >"$t67/b6.out" 2>&1 || true
+  ! grep -q REMOTE-ALERT "$t67/b6.out" && grep -q " $h67/kits2\$" "$s67/expected" \
+    && ok "a destination changed by editing the file starts a new count, with no deletion alert" \
+    || no "after a hand-edited destination: $(grep -E 'REMOTE-ALERT|ERROR' "$t67/b6.out" | tail -2 | tr '\n' '|') anchor: $(cat "$s67/expected" 2>&1)"
+  # an anchor written before 3.2.0 names no destination: it describes the one status.json recorded
+  as67 sh -c "echo 'timecrate-2099-01-01_00-00-00.tar.zst.gpg 99' > '$s67/expected'"
+  sleep 1; tc67 backup >"$t67/b7.out" 2>&1 || true
+  grep -q 'REMOTE-ALERT' "$t67/b7.out" \
+    && ok "an older anchor still raises the alert for the destination it was written for" \
+    || no "an older anchor for this destination raised nothing: $(tail -1 "$t67/b7.out")"
+  as67 sh -c "echo 'timecrate-2099-01-01_00-00-00.tar.zst.gpg 99' > '$s67/expected'; sed -i 's#$h67/kits2#$h67/elsewhere#' '$s67/status.json'"
+  sleep 1; tc67 backup >"$t67/b8.out" 2>&1 || true
+  ! grep -q 'REMOTE-ALERT' "$t67/b8.out" \
+    && ok "...and stays quiet about a destination it was not written for" \
+    || no "an older anchor for another destination raised: $(grep REMOTE-ALERT "$t67/b8.out" | tail -1)"
+
+  # n) a kit that arrives the right size with the wrong content is not an upload
+  k67(){ find "$h67/kits2" -name '*.tar.zst.gpg' | wc -l | tr -d ' '; }
+  n67="$(k67)"
+  cat > /usr/local/bin/rclone <<'SHIM'
+#!/bin/bash
+/usr/bin/rclone "$@"; rc=$?
+for last; do :; done
+case " $* " in *" rcat "*)
+  case "$last" in *.tar.zst.gpg) printf 'XXXXXXXX' | dd of="$last" bs=1 seek=64 conv=notrunc 2>/dev/null;; esac;;
+esac
+exit $rc
+SHIM
+  chmod 755 /usr/local/bin/rclone
+  sleep 1
+  if RC_TRIES=1 tc67 backup >"$t67/b9.out" 2>&1; then no "a kit stored with the wrong content was accepted as uploaded"
+  elif grep -q 'upload FAILED' "$t67/b9.out" && [ "$(k67)" = "$n67" ]; then
+    ok "a stored kit whose hash differs is refused and removed, and the local copy is kept"
+  else no "corrupt upload: $(tail -1 "$t67/b9.out") — kits there: $(k67), were $n67"; fi
+  rm -f /usr/local/bin/rclone
+
+  # o) a per-user file the account cannot read stops the run: 3.1.3 left one behind when
+  # `remote set-path` ran under sudo, and passing over it would mean the default destination
+  chown root:root "$h67/.config/timecrate/timecrate.conf"; chmod 600 "$h67/.config/timecrate/timecrate.conf"
+  if tc67 status >"$t67/uc.out" 2>&1; then no "a per-user file the account cannot read was passed over in silence"
+  elif grep -q "sudo chown -h $u67: $h67/.config/timecrate/timecrate.conf" "$t67/uc.out"; then
+    ok "a per-user file the account cannot read stops the run and names the fix"
+  else no "unreadable per-user file: $(tail -1 "$t67/uc.out")"; fi
+  tc67 help >/dev/null 2>&1 && ok "...and help still answers" || no "help died on the unreadable per-user file"
+  chown "$u67:$u67" "$h67/.config/timecrate/timecrate.conf"
+
+  # p) a file inside the keyring that root left closed to the account is named as that, where
+  # GnuPG would report a key that is missing
+  chown root:root "$g67/pubring.kbx"; chmod 600 "$g67/pubring.kbx"
+  if tc67 backup --no-upload >"$t67/kb.out" 2>&1; then no "a backup ran with a keyring file the account cannot read"
+  elif grep -q "$g67/pubring.kbx cannot be read by $u67" "$t67/kb.out"; then
+    ok "a keyring file the account cannot read is named, with the command that hands it back"
+  else no "unreadable keyring file: $(tail -1 "$t67/kb.out")"; fi
+  chown "$u67:$u67" "$g67/pubring.kbx"
+
+  # q) under sudo, with no account pinned, init still ends by naming the command that pins it
+  sed '/^TIMECRATE_USER=/d' "$t67/etc/timecrate.conf" > "$t67/etc/unpinned.conf"; chmod 644 "$t67/etc/unpinned.conf"
+  env "${t67clean[@]}" -u PKEXEC_UID SUDO_USER="$u67" TIMECRATE_SYSTEM_CONF="$t67/etc/unpinned.conf" \
+      TIMECRATE_SECRET_ENV="$t67/etc/timecrate.env" TIMECRATE_ETC="$t67/etc" TIMECRATE_STAGING="$t67/staging" \
+      TIMECRATE_LOCK="$t67/lock" "$TC" init >"$t67/init2.out" 2>&1 </dev/null || true
+  grep -q "config set-user $u67" "$t67/init2.out" \
+    && ok "init under sudo on a machine with no account pinned still names the command that pins it" \
+    || no "init (sudo, unpinned): $(tail -2 "$t67/init2.out" | tr '\n' '|')"
 
   as67 gpgconf --homedir "$g67" --kill gpg-agent >/dev/null 2>&1 || true
 fi

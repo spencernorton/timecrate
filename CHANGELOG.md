@@ -23,17 +23,27 @@ All notable changes to Timecrate are documented here.
   - What `/etc/timecrate.env` sets no longer reaches rclone, except names starting with
     `RCLONE_`. A credential rclone needs goes in the account's rclone configuration, or in that
     file as `RCLONE_CONFIG_<REMOTE>_<OPTION>`.
-  - A key store or state directory that an earlier release left owned by root is no use to the
-    account. The state directory is handed back on the first run; for a key store the error
-    names the command (`sudo chown -hR <account>: ~/.config/timecrate`).
+  - A key store, a per-user settings file or a state directory that an earlier release left
+    owned by root is no use to the account. The state directory is handed back by the first
+    command run as root. For the other two the run stops and the error names the command
+    (`sudo chown -hR <account>: ~/.config/timecrate`): a settings file passed over in silence
+    would send the kit wherever the defaults point.
   - `init`, `import-key`, `export-key`, `pq`, `escrow-doc`, `keys` and `remote` run as the
     account even under `sudo`, so they no longer leave root-owned files behind.
 - **A folder is a destination.** `timecrate remote set-path /media/you/drive/TIMECRATE` sends
   the kits to an attached drive, a mounted share or a folder another program syncs. The folder
   must exist and be writable by the account, a drive that is not mounted stops the backup
-  instead of being replaced by a directory, and a destination inside the backed-up tree is left
-  out of the kits. `remote list` shows the remotes rclone already has, any of which can be a
-  destination, and `remote set-mirror <remote:path>|<folder>|off` sets or clears the second copy.
+  instead of being replaced by a directory, and the kits in a destination inside the backed-up
+  tree are left out of the next ones (anything else in that folder is backed up as usual).
+  `remote list` shows the remotes rclone already has, any of which can be a destination, and
+  `remote set-mirror <remote:path>|<folder>|off` sets or clears the second copy.
+- **A changed destination is not a deletion.** The anti-rollback anchor records the destination
+  it describes. Pointing the backups somewhere else — by command, in the window or by editing
+  the file — starts a new count there, where it used to raise a deletion alert at the next
+  backup unless the change went through `remote set-path`.
+- **An upload is checked by content.** The stored copy's hash is compared with the kit's as well
+  as its size, on every backend that reports one, and a copy that fails is removed and sent
+  again.
 - **The account is pinned with a command.** `sudo timecrate config set-user <login>` replaces
   the hand-edit of `/etc/timecrate/timecrate.conf` that a fresh install needed before its
   nightly backup could work. `status` and the window say when no account is pinned, and `init`
@@ -42,7 +52,7 @@ All notable changes to Timecrate are documented here.
   or clears a second copy. The Schedule page takes a daily time of your choosing and a pause of
   1, 3, 7 or 30 days; the main window shows a pause, and warns when scheduled runs are not tied
   to an account, with a button that fixes it. A change to only the schedule is now saved: it
-  was dropped when nothing else had changed.
+  was dropped when nothing else had changed. A warning from the engine no longer empties a view.
 - **The monthly drill fetches each kit once.** Its sweep now lists each archive after
   authenticating it, and the wrapper's separate `verify --all` pass is gone. With long
   retention that pass downloaded the whole archive a second time every month, under a one-hour

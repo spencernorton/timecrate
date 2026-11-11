@@ -36,6 +36,8 @@ cat > /tmp/gs/bin/timecrate <<'STUB'
 #!/bin/sh
 # every call is appended here when asked, so a test can assert on what the window sent
 [ -z "${TC_STUB_LOG:-}" ] || echo "$*" >> "$TC_STUB_LOG"
+# the engine warns on stderr, on any call (a setting it ignored, say): no view may read that as data
+echo "2026-07-29T03:00:00-06:00 [timecrate][WARN] stub: one warning on every call" >&2
 case "$1 $2" in
   "status --json") cat <<'J'
 {"version":"3.0.0","remote":"dropbox:Backup/TIMECRATE","remote2":"","cipher":"AES-256 (AES-NI)",
