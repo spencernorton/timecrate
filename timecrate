@@ -141,7 +141,8 @@ _tc_read_user_conf(){
     # shellcheck disable=SC2016  # the $-name belongs to the inner sh
     as_user test -e "$1" || as_user sh -c '[ -d "$1" ] && [ ! -x "$1" ]' _ "${1%/*}" || return 0
     case "${2:-}" in help|-h|--help|version|--version) return 0;; esac
-    die "$1 cannot be read by $TC_USER, so the settings in it (where the backups go, for one) would be ignored. Hand it back with:  sudo chown -hR $TC_USER: ${1%/*}"
+    local fix="-h $TC_USER: $1"; case "${1%/*}" in */timecrate) fix="-hR $TC_USER: ${1%/*}";; esac
+    die "$1 cannot be read by $TC_USER, so the settings in it (where the backups go, for one) would be ignored. Hand it back with:  sudo chown $fix"
   fi
   TC_CONF_SOURCES="${TC_CONF_SOURCES:+$TC_CONF_SOURCES }$1"
   while IFS= read -r -d '' kind && IFS= read -r -d '' val; do
@@ -533,6 +534,16 @@ remote_is_local(){ case "${1-$REMOTE}" in /*) return 0;; esac; return 1; }
 # A folder is never created on the way to a backup: a drive that is not mounted would otherwise
 # be quietly replaced by a directory on the disk the backup is meant to survive.
 dest_present(){ remote_is_local "$1" || return 0; as_user test -d "$1" && as_user test -w "$1" && as_user test -x "$1"; }
+# The kits at destination $1, oldest first, in KITS_AT. Fails, with the reason in RC_ERR, when that
+# is not known: a folder that is not there (a drive not mounted), or a listing that did not happen
+# (the network, at 03:00). rclone's 3 and 4 say a remote's folder is gone, and that is an answer:
+# no kits, which is the deletion the callers look for.
+kits_at(){
+  KITS_AT=""
+  ! remote_is_local "$1" || as_user test -d "$1" || { RC_ERR="the folder is not there — is its drive mounted?"; return 1; }
+  rc_capture lsf "$1" --include "$KIT_GLOB" || case "$?" in 3|4) ;; *) return 1;; esac
+  KITS_AT="$(printf '%s\n' "$RC_OUT" | kit_sort || true)"
+}
 # GnuPG on the account's keyring runs as the account. gpg.conf, gpg-agent.conf and common.conf in
 # that keyring can each name a program to start (agent-program, keyboxd-program), and root used to
 # start it; and root's agent left sockets and key files there that the account could not replace.
@@ -1373,12 +1384,8 @@ check_remote_anchor(){
   local exp_l="" exp_c="" listing cur_l cur_c out=""
   anchor="$(anchor_for "$2" "$remote")" || return 0
   read -r exp_l exp_c _ <<< "$anchor" || true
-  # rclone's 3 and 4 say the folder itself is not there, which is the deletion this check is for.
-  # Any other failure is a listing that did not happen (the network, at 03:00), not an empty one.
-  rc_capture lsf "$remote" --include "$KIT_GLOB" || case "$?" in 3|4) ;; *)
-    warn "could not list $remote (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is not checked this run"
-    return 0;; esac
-  listing="$(printf '%s\n' "$RC_OUT" | kit_sort || true)"
+  kits_at "$remote" || { warn "could not list $remote (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is not checked this run"; return 0; }
+  listing="$KITS_AT"
   cur_l="$(printf '%s\n' "$listing" | tail -1)"
   cur_c="$(printf '%s\n' "$listing" | grep -c . || true)"
   if [ -n "$exp_l" ]; then
@@ -2291,7 +2298,7 @@ cmd_recovery_drill(){
   # the newest kit of either series, or the one named (a file name or a bare timestamp)
   local name
   if [ -n "$ts" ]; then name="$(resolve_kit "$REMOTE" "$ts")"
-  else name="$(rc lsf "$REMOTE" --include "$KIT_GLOB" 2>/dev/null | kit_sort | tail -1)"; fi
+  else kits_at "$REMOTE" || die "cannot list $REMOTE: ${RC_ERR:-rclone gave no reason}"; name="$(printf '%s\n' "$KITS_AT" | tail -1)"; fi
   if [ -z "$name" ]; then
     # total wipe is the WORST deletion case — diagnose it, never say "run a backup first"
     # (a fresh backup would rebaseline the anchor and destroy the evidence while the provider's
@@ -2343,12 +2350,14 @@ cmd_recovery_drill(){
   # ---- remote-wide checks: deletion/rollback detection + verify EVERY kit (not just newest) ----
   local extra_fail="" nkits=0 nver=0 vk
   local -a allkits=()
-  mapfile -t allkits < <(rc lsf "$REMOTE" --include "$KIT_GLOB" 2>/dev/null | kit_sort)
+  local listed=1   # a listing that fails is a sweep that did not happen, not an empty destination
+  kits_at "$REMOTE" || { listed=0; extra_fail="could not list $REMOTE (${RC_ERR:-rclone gave no reason}): its kits were not swept"; }
+  [ -z "$KITS_AT" ] || mapfile -t allkits <<< "$KITS_AT"
   nkits=${#allkits[@]}
   # the remote must still hold what the last backup recorded — an attacker deleting kits (or
   # re-uploading old ones) is invisible to per-kit signature checks, every old kit signs clean
   local anchor
-  if anchor="$(anchor_for expected "$REMOTE")"; then
+  if [ "$listed" = 1 ] && anchor="$(anchor_for expected "$REMOTE")"; then
     # NB: a negative subscript into an empty array is FATAL under set -u (':-' does not save
     # it) — guard nkits; an empty listing is itself a deletion signal handled by the count check
     local exp_latest="" exp_count="" newest=""
@@ -2405,15 +2414,19 @@ cmd_recovery_drill(){
   # catch a wiped/rotted REMOTE2 that per-backup mirror verification can never see
   if [ -n "$REMOTE2" ] && anchor="$(anchor_for expected2 "$REMOTE2")"; then
     local l2 n2 e2l="" e2c=""
-    l2="$(rc lsf "$REMOTE2" --include "$KIT_GLOB" 2>/dev/null | kit_sort || true)"
-    n2="$(printf '%s\n' "$l2" | grep -c . || true)"
-    read -r e2l e2c _ <<< "$anchor" || true
-    if [ -n "$e2l" ] && ! printf '%s\n' "$l2" | grep -qFx "$e2l"; then
-      extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DEGRADED: recorded newest $e2l missing from $REMOTE2"
+    if kits_at "$REMOTE2"; then
+      l2="$KITS_AT"
+      n2="$(printf '%s\n' "$l2" | grep -c . || true)"
+      read -r e2l e2c _ <<< "$anchor" || true
+      if [ -n "$e2l" ] && ! printf '%s\n' "$l2" | grep -qFx "$e2l"; then
+        extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DEGRADED: recorded newest $e2l missing from $REMOTE2"
+      fi
+      ! anchor_short "$e2c" "$n2" "$REMOTE2" \
+        || extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DELETION: ${n2:-0} kits, expected >= ${e2c%+}"
+      e2c="${e2c%+}"; log "remote2 anchor check: ${n2:-0} kits on $REMOTE2 (expected >= ${e2c:-?})"
+    else
+      extra_fail="${extra_fail:+$extra_fail; }could not list $REMOTE2 (${RC_ERR:-rclone gave no reason}): the mirror was not checked"
     fi
-    ! anchor_short "$e2c" "$n2" "$REMOTE2" \
-      || extra_fail="${extra_fail:+$extra_fail; }REMOTE2 DELETION: ${n2:-0} kits, expected >= ${e2c%+}"
-    e2c="${e2c%+}"; log "remote2 anchor check: ${n2:-0} kits on $REMOTE2 (expected >= ${e2c:-?})"
   fi
 
   as_user mkdir -p "$STATE_DIR" 2>/dev/null || true

@@ -3406,7 +3406,22 @@ SHIM
   grep -q 'REMOTE-ALERT.*ZERO kits' "$t67/b11.out" \
     && ok "...and a destination that rclone says is not there still is" \
     || no "missing destination: $(grep -E 'REMOTE-ALERT|ERROR' "$t67/b11.out" | tail -2 | tr '\n' '|')"
+  echo 1 > /tmp/t67-lsf-rc; RC_TRIES=1 tc67 recovery-drill >"$t67/d10.out" 2>&1 || true
+  ! grep -q 'DELETION' "$t67/d10.out" && grep -q 'cannot list' "$t67/d10.out" \
+    && ok "...and the drill says it could not list, where it said not to run a backup" \
+    || no "drill on a failed listing: $(grep -E 'DELETION|cannot list|ERROR' "$t67/d10.out" | tail -2 | tr '\n' '|')"
   rm -f /usr/local/bin/rclone /tmp/t67-lsf-rc
+  # n3) a mirror folder that is not there is a drive that is not mounted, not kits deleted
+  mv "$t67/dest2" "$t67/dest2.away"
+  sleep 1; tc67 backup >"$t67/b12.out" 2>&1 || true
+  ! grep -q 'REMOTE-ALERT' "$t67/b12.out" && grep -q 'is its drive mounted' "$t67/b12.out" \
+    && ok "a mirror folder that is not there reads as a drive not mounted, not as kits deleted" \
+    || no "absent mirror, backup: $(grep -E 'REMOTE-ALERT|mounted|ERROR' "$t67/b12.out" | tail -2 | tr '\n' '|')"
+  tc67 recovery-drill >"$t67/d12.out" 2>&1 || true
+  ! grep -q 'REMOTE2 DE' "$t67/d12.out" && grep -q 'the mirror was not checked' "$t67/d12.out" \
+    && ok "...and the drill reports the mirror as not checked" \
+    || no "absent mirror, drill: $(grep -E 'REMOTE2|mirror|ERROR' "$t67/d12.out" | tail -2 | tr '\n' '|')"
+  mv "$t67/dest2.away" "$t67/dest2"
 
   # o) a per-user file the account cannot read stops the run: 3.1.3 left one behind when
   # `remote set-path` ran under sudo, and passing over it would mean the default destination

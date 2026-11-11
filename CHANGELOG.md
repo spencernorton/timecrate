@@ -41,8 +41,9 @@ All notable changes to Timecrate are documented here.
   it describes. Pointing the backups somewhere else — by command, in the window or by editing
   the file — starts a new count there, where it used to raise a deletion alert at the next
   backup unless the change went through `remote set-path`. A listing that fails is no longer
-  read as an empty destination either: the check says it could not look, where a network outage
-  at backup time used to raise the deletion alert.
+  read as an empty destination either: the nightly check and the monthly drill say they could
+  not look, where a network outage used to raise the deletion alert. A folder that is not there
+  is reported as a drive that is not mounted.
 - **An upload is checked by content.** The stored copy's hash is compared with the kit's as well
   as its size, on every backend that reports one, and a copy that fails is removed and sent
   again. `RCLONE_IGNORE_CHECKSUM` turns the comparison off, as it does for rclone itself.
