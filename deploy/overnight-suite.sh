@@ -85,7 +85,15 @@ skip(){ say "  [SKIP] $*"; SKIP=$((SKIP+1)); }
 # NOTE: `timeout` is a binary and cannot execute a shell function, so it must be passed THROUGH
 # this helper (asuser timeout N cmd), never wrapped around it (timeout N asuser cmd) — the latter
 # fails with "timeout: failed to execute process", which is how T1 and T4 first "failed".
-asuser(){ if [ "$(id -u)" = 0 ]; then runuser -u "$TC_USER" -- env HOME="$USER_HOME" "$@"; else "$@"; fi; }
+# What runs as the account does not get /etc/timecrate.env: this script holds it (the unit's
+# EnvironmentFile, and the loop above), and it is root-only because it carries what the alert and
+# escrow-key commands need. Every name that file sets is dropped on the way, as the engine does;
+# rclone's own RCLONE_* settings still cross, since rclone is what runs there.
+_TC_ASUSER_DROP=()
+while IFS= read -r _v; do
+  case "$_v" in ''|PWD|OLDPWD|SHLVL|_|PATH|RCLONE_*) ;; *) _TC_ASUSER_DROP+=(-u "$_v");; esac
+done < <(env -i bash -c 'set -a; . "$1" >/dev/null 2>&1; compgen -e' _ /etc/timecrate.env 2>/dev/null || true)
+asuser(){ if [ "$(id -u)" = 0 ]; then runuser -u "$TC_USER" -- env "${_TC_ASUSER_DROP[@]}" HOME="$USER_HOME" "$@"; else "$@"; fi; }
 
 # Stop starting new work once we are close to the backup window. Checked BETWEEN tests, so a long
 # test that already began is allowed to finish rather than being killed halfway through a VM.

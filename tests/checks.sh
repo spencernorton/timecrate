@@ -971,10 +971,16 @@ case "$*" in *" lsf "*) printf 'timecrate-2026-01-01_00-00-00.tar.zst.gpg\n' ;; 
 exit 0
 FAKE
 rm -f /tmp/tmrem/user.conf
-TIMECRATE_REMOTE=dropbox:Backup/TC "$TC" remote set-path /not/a/remote --yes >/tmp/t27f.out 2>&1 \
-  && no "set-path accepted a path with no remote prefix" \
+TIMECRATE_REMOTE=dropbox:Backup/TC "$TC" remote set-path notaremote --yes >/tmp/t27f.out 2>&1 \
+  && no "set-path accepted a word that is neither <remote>:<path> nor a folder" \
   || { grep -q 'not a remote path' /tmp/t27f.out && ok "set-path refuses a path that is not <remote>:<path>" \
        || no "wrong refusal: $(tail -1 /tmp/t27f.out)"; }
+# an absolute path is a folder on this machine, and it has to be there: a typo, or a drive that
+# is not mounted, must not become a destination that every later backup fails on
+TIMECRATE_REMOTE=dropbox:Backup/TC "$TC" remote set-path /not/a/folder --yes >/tmp/t27f2.out 2>&1 \
+  && no "set-path accepted a folder that does not exist" \
+  || { grep -q 'is not a folder on this machine' /tmp/t27f2.out && ok "set-path refuses a folder that is not there" \
+       || no "wrong refusal: $(tail -1 /tmp/t27f2.out)"; }
 # without --yes and without a tty it must refuse rather than assume consent
 TIMECRATE_REMOTE=dropbox:Backup/TC "$TC" remote set-path dropbox:Other </dev/null >/tmp/t27g.out 2>&1 \
   && no "set-path changed the remote with no tty and no --yes" \
@@ -1519,11 +1525,13 @@ echo "== T34: root never writes backups through a path the target user controls 
 if id -u nobody >/dev/null 2>&1; then
   rm -rf /tmp/t34stage /tmp/t34victim; mkdir -p /tmp/t34victim
   victim_before=$(stat -c '%U' /tmp/t34victim)
+  # The keys are used AS the account since 3.2.0, so it gets a key store it owns, as on a real box.
+  rm -rf /tmp/t34conf; cp -a /tmp/tm/conf /tmp/t34conf; chown -R nobody /tmp/t34conf
 
   # staging is root-owned by construction now, so there is no ownership to hand over and nothing
   # for a symlink swap to steal. Belt and braces: a symlinked staging path is still refused.
   ln -s /tmp/t34victim /tmp/t34stage
-  out=$(TIMECRATE_USER=nobody TIMECRATE_STAGING=/tmp/t34stage \
+  out=$(TIMECRATE_USER=nobody TIMECRATE_CONF=/tmp/t34conf TIMECRATE_STAGING=/tmp/t34stage \
         TIMECRATE_INCLUDE=/tmp/inc.small TIMECRATE_EXCLUDE=/tmp/exc.small \
         "$TC" backup --no-upload --force 2>&1 || true)
   [ "$(stat -c '%U' /tmp/t34victim)" = "$victim_before" ] \
@@ -1539,7 +1547,7 @@ if id -u nobody >/dev/null 2>&1; then
   # A root-controlled base, because /tmp is world-writable and is now refused outright for a
   # non-root TC_USER -- which is the whole point of the rule, and is asserted separately below.
   rm -f /tmp/t34stage; rm -rf /var/lib/t34stage
-  TIMECRATE_USER=nobody TIMECRATE_STAGING=/var/lib/t34stage \
+  TIMECRATE_USER=nobody TIMECRATE_CONF=/tmp/t34conf TIMECRATE_STAGING=/var/lib/t34stage \
     TIMECRATE_INCLUDE=/tmp/inc.small TIMECRATE_EXCLUDE=/tmp/exc.small \
     "$TC" backup --no-upload --force >/dev/null 2>&1 || true
   if [ -d /var/lib/t34stage ]; then
@@ -1559,7 +1567,7 @@ if id -u nobody >/dev/null 2>&1; then
   else
     hs34=/tmp/t34home/archives/tm; mkdir -p /tmp/t34home; chown nobody /tmp/t34home
   fi
-  out34h="$(TIMECRATE_USER=nobody TIMECRATE_STAGING="$hs34" \
+  out34h="$(TIMECRATE_USER=nobody TIMECRATE_CONF=/tmp/t34conf TIMECRATE_STAGING="$hs34" \
       TIMECRATE_INCLUDE=/tmp/inc.small TIMECRATE_EXCLUDE=/tmp/exc.small \
       "$TC" backup --no-upload --force 2>&1 || true)"
   printf '%s' "$out34h" | grep -q 'refusing to use' \
@@ -1616,7 +1624,7 @@ FAKE
       || no "the cache fallback did not fire: $(tail -1 /tmp/t34w.out)"
     rm -f /usr/local/bin/rclone; rm -rf /tmp/t34remote /tmp/t34absent /tmp/t34cache2
   fi
-  rm -rf /tmp/t34stage /tmp/t34victim /tmp/t34cache /tmp/t34kit.tar.zst.gpg*
+  rm -rf /tmp/t34stage /tmp/t34victim /tmp/t34cache /tmp/t34kit.tar.zst.gpg* /tmp/t34conf
 else
   ok "no nobody user here (skipped)"
 fi
@@ -1643,7 +1651,7 @@ for a in "$@"; do [ "$prev" = --config ] && cfg="$a"; prev="$a"; done
 [ -n "$cfg" ] && [ -f "$cfg" ] && printf 'token = refreshed\n' > "$cfg"
 exit 0
 FAKE
-  chmod +x /usr/local/bin/rclone
+  chmod 755 /usr/local/bin/rclone   # rclone runs as the account: executable by it whatever the umask
   TIMECRATE_USER=nobody TIMECRATE_RCLONE_CONF=/tmp/t35/userhome/.config/rclone/rclone.conf \
     "$TC" list >/tmp/t35.out 2>&1 || true
 
@@ -1753,18 +1761,19 @@ grep -qi 'pause' <<<"$(sed -n '/^cmd_recovery_drill()/,/^}/p' "$TC")" \
 chmod 755 /tmp/tm36 2>/dev/null || true
 chmod 700 /tmp/tm36/state 2>/dev/null || true
 ( umask 077; "$TC" pause 2h >/dev/null 2>&1 )
-# Structural, and honestly so. write_status ALSO chmods STATE_DIR to 755, so after `pause` returns
-# no end-state check can tell the guard apart from that — an earlier version of this assertion
-# passed with the guard deleted. What must actually hold is the ORDER: the pause file is never
-# published while the directory is unreachable. Assert that.
-pl36="$(sed -n '/^cmd_pause()/,/^}/p' "$TC")"
-g36=$(printf '%s' "$pl36" | grep -n 'could not be made traversable' | head -1 | cut -d: -f1)
-mv36=$(printf '%s' "$pl36" | grep -n 'mv -f "\$tmpf"' | head -1 | cut -d: -f1)
-if [ -n "$g36" ] && [ -n "$mv36" ] && [ "$g36" -lt "$mv36" ]; then
-  ok "the traversability guard runs BEFORE the pause file is published"
-else
-  no "pause publishes without first proving STATE_DIR is reachable (guard=${g36:-absent} publish=${mv36:-absent})"
-fi
+# Since 3.2.0 the pause is written AND read back as the account, so the account's own `status`
+# can always see what root's backup acts on. What must never come back is the old failure: root
+# records a pause where the account cannot read it. Give root a state directory the account
+# cannot enter, and the pause has to be refused with nothing left behind.
+if id -u nobody >/dev/null 2>&1; then
+  mkdir -p /tmp/tm36/closed; chmod 700 /tmp/tm36/closed
+  TIMECRATE_USER=nobody TIMECRATE_STATE=/tmp/tm36/closed "$TC" pause 2h >/tmp/t36l.out 2>&1 \
+    && no "a pause the account cannot read was accepted: $(tail -1 /tmp/t36l.out)" \
+    || ok "a pause the account could not read back is refused"
+  [ -z "$(ls -A /tmp/tm36/closed)" ] \
+    && ok "...and no pause file is left where only root can see it" \
+    || no "root published a pause the account cannot read: $(ls -A /tmp/tm36/closed)"
+else ok "no nobody user for the unreadable-pause check (skipped)"; fi
 [ "$(stat -c '%a' /tmp/tm36/state/paused 2>/dev/null)" = 644 ] \
   && ok "the pause file is 0644 whatever the umask" \
   || no "pause file is mode $(stat -c '%a' /tmp/tm36/state/paused 2>/dev/null) — unreadable to an unprivileged status"
@@ -3067,7 +3076,7 @@ if grep -q 'engine-env REMOTE=unset USER=unset PRESET=kept' "$t66/drill.out"; th
 else no "drill leaked config into the engine's environment: $(grep engine-env "$t66/drill.out" | head -1)"; fi
 # the same block in the other two wrappers, checked where the engine is first called
 for w in overnight-suite.sh capstone-and-alert.sh; do
-  # up to the un-export (capstone does it after its per-user read), then close that loop
+  # up to the un-export, then close that loop
   { sed -n '1,/export -n "\${_v?}"/p' "$t66/$w"; echo 'done'; } > "$t66/$w.head"
   if (cd "$t66" && env "${t66u[@]}" PATH="$t66/bin:$PATH" TIMECRATE_T66_PRESET=kept \
         bash -c '. "$1"; [ -z "$(compgen -e | grep "^TIMECRATE_" | grep -v "^TIMECRATE_T66_PRESET$")" ] && [ "$TIMECRATE_REMOTE" = system:Old ]' _ "$t66/$w.head") 2>/dev/null; then
@@ -3075,6 +3084,219 @@ for w in overnight-suite.sh capstone-and-alert.sh; do
   else no "$w still exports config-file TIMECRATE_* values"; fi
 done
 rm -rf "$t66"
+
+echo "== T67: root acts AS the account, never on the strength of its files; folder destinations (3.2.0) =="
+# Everything above runs with TIMECRATE_USER=root, where there is no boundary to cross. This is
+# the shape a real machine has: root, a separate unprivileged account, the real rclone and gpg,
+# hybrid kits and a folder for a destination. It comes LAST because it installs the real rclone,
+# which the sections above must not find on PATH.
+rm -f /usr/local/bin/rclone
+apt-get install -y -qq rclone >/dev/null 2>&1
+u67=tc67acct; h67="/home/$u67"; t67=/var/lib/t67; made67=0
+t67clean=(); for v in $(compgen -e | grep '^TIMECRATE_' || true); do t67clean+=(-u "$v"); done
+tc67(){ env "${t67clean[@]}" -u SUDO_USER -u PKEXEC_UID TIMECRATE_SYSTEM_CONF="$t67/etc/timecrate.conf" \
+          TIMECRATE_SECRET_ENV="$t67/etc/timecrate.env" TIMECRATE_ETC="$t67/etc" \
+          TIMECRATE_STAGING="$t67/staging" TIMECRATE_LOCK="$t67/lock" "$TC" "$@"; }
+as67(){ setpriv --reuid "$u67" --regid "$u67" --init-groups env HOME="$h67" "$@"; }
+j67(){ python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1]))' "$1" 2>/dev/null; }
+g67="$h67/.config/timecrate/gnupg"; s67="$h67/.local/state/timecrate"
+rm -rf "$t67"
+if ! command -v rclone >/dev/null 2>&1; then
+  no "the rclone package could not be installed, so none of this section ran"
+elif id -u "$u67" >/dev/null 2>&1 || [ -e "$h67" ] || ! useradd -m -s /bin/bash "$u67" >/dev/null 2>&1; then
+  no "no disposable account could be made, so none of this section ran"
+else
+  made67=1
+  mkdir -p "$t67/etc" "$t67/dest2" "$t67/rs/timecrate"
+  chmod 755 "$t67" "$t67/etc" "$t67/dest2" "$t67/rs" "$t67/rs/timecrate"; chown "$u67:" "$t67/dest2"
+  # the destination sits INSIDE the backed-up tree on purpose: a folder another program syncs
+  as67 mkdir -p "$h67/docs/kits"; as67 sh -c "head -c 300000 /dev/urandom > '$h67/docs/a.bin'"
+  printf 'etc/hostname\n~/docs\n' > "$t67/etc/include"; printf '*.cache\n' > "$t67/etc/exclude"
+  printf 'TIMECRATE_MIN_MB=0\nTIMECRATE_KEEP=3\n' > "$t67/etc/timecrate.conf"
+  printf 'T67_ALERT_TOKEN=sekret-67\nRCLONE_TPSLIMIT=7\n' > "$t67/etc/timecrate.env"
+  chmod 644 "$t67/etc/include" "$t67/etc/exclude" "$t67/etc/timecrate.conf"; chmod 600 "$t67/etc/timecrate.env"
+
+  # a) pinning the account is a command, not a hand-edit of a file in /etc
+  [ "$(tc67 status --json 2>/dev/null | j67 user_pinned)" = False ] \
+    && ok "status reports that no account is pinned" || no "status does not report the unpinned account"
+  tc67 config set-user nosuch67 >/dev/null 2>&1 && no "set-user took a login that does not exist" \
+    || ok "set-user refuses a login that does not exist"
+  tc67 config set-user "$u67;id" >/dev/null 2>&1 && no "set-user took a value that is not a login" \
+    || ok "set-user refuses a value that is not a login"
+  tc67 config set-user "$u67" >/dev/null 2>&1
+  [ "$(tc67 config get TC_USER 2>/dev/null)" = "$u67" ] && grep -qx 'TIMECRATE_KEEP=3' "$t67/etc/timecrate.conf" \
+    && [ "$(tc67 status --json 2>/dev/null | j67 user_pinned)" = True ] \
+    && ok "config set-user pins the account, keeps the rest of the file, and status follows" \
+    || no "set-user did not pin: $(tr '\n' '|' < "$t67/etc/timecrate.conf")"
+
+  # b) a key command under root runs as the account -- 3.1.3 left the key store root-owned
+  tc67 init >"$t67/init.out" 2>&1 || true
+  [ -s "$h67/.config/timecrate/recipients.txt" ] && [ -s "$h67/.config/timecrate/pq-secret.pem" ] \
+    && [ -z "$(find "$h67" ! -user "$u67" 2>/dev/null | head -1)" ] \
+    && ok "init under root runs as the account: nothing in its home is root-owned" \
+    || no "init under root: $(tail -2 "$t67/init.out" | tr '\n' '|') not the account's: $(find "$h67" ! -user "$u67" 2>/dev/null | head -3 | tr '\n' ' ')"
+
+  # c) the per-user file is settings, never a script root runs
+  as67 sh -c "cat >> '$h67/.config/timecrate/timecrate.conf'" <<EOF
+TIMECRATE_CRYPTO=hybrid
+TIMECRATE_ALERT_CMD=$h67/evil
+touch $h67/pwned-line
+TIMECRATE_KEEP=\$(touch $h67/pwned-subst)
+TIMECRATE_KEEP_YEARLY=many
+TIMECRATE_KEEP_MONTHLY="7"
+EOF
+  tc67 config >"$t67/cfg.out" 2>&1 || true
+  [ ! -e "$h67/pwned-line" ] && [ ! -e "$h67/pwned-subst" ] \
+    && ok "nothing in the per-user file is executed" \
+    || no "the per-user file was RUN: $(ls "$h67"/pwned-* 2>/dev/null | tr '\n' ' ')"
+  [ -z "$(tc67 config get ALERT_CMD 2>/dev/null)" ] && grep -q 'TIMECRATE_ALERT_CMD is ignored' "$t67/cfg.out" \
+    && ok "a setting that is the administrator's is ignored there, and the file's owner is told" \
+    || no "the per-user file set ALERT_CMD='$(tc67 config get ALERT_CMD 2>/dev/null)'"
+  [ "$(tc67 config get KEEP 2>/dev/null)" = 3 ] && [ "$(tc67 config get KEEP_YEARLY 2>/dev/null)" = 3 ] \
+    && [ "$(tc67 config get KEEP_MONTHLY 2>/dev/null)" = 7 ] && [ "$(tc67 config get CRYPTO 2>/dev/null)" = hybrid ] \
+    && ok "a value that is not plain is dropped, a quoted one is read, and the rest still apply" \
+    || no "per-user values: KEEP=$(tc67 config get KEEP 2>/dev/null) YEARLY=$(tc67 config get KEEP_YEARLY 2>/dev/null) MONTHLY=$(tc67 config get KEEP_MONTHLY 2>/dev/null) CRYPTO=$(tc67 config get CRYPTO 2>/dev/null)"
+  # (the watch list names a pattern over a directory only root can read; see e)
+  as67 sh -c "printf 'TIMECRATE_CRYPTO=hybrid\nTIMECRATE_GIT_WATCH=\"$h67/proj /root/*\"\n' > '$h67/.config/timecrate/timecrate.conf'"
+  as67 mkdir -p "$h67/proj/.git"; mkdir -p /root/t67repo/.git
+
+  # d) a folder on this machine is a destination, and so is any remote rclone already knows
+  tc67 remote set-path "$h67/docs/kits" --yes >"$t67/sp.out" 2>&1 || true
+  [ "$(tc67 config get REMOTE 2>/dev/null)" = "$h67/docs/kits" ] \
+    && [ "$(stat -c %U "$h67/.config/timecrate/timecrate.conf")" = "$u67" ] \
+    && [ "$(tc67 remote status --json 2>/dev/null | j67 type)" = local ] \
+    && ok "set-path takes a folder, and the per-user file stays the account's" \
+    || no "folder destination: $(tail -1 "$t67/sp.out")"
+  tc67 remote set-mirror "$h67/docs/kits" --yes >/dev/null 2>&1 \
+    && no "the second copy was allowed onto the first" || ok "a second copy cannot go where the first one does"
+  tc67 remote set-mirror "$t67/dest2" --yes >"$t67/sm.out" 2>&1 || true
+  [ "$(tc67 config get REMOTE2 2>/dev/null)" = "$t67/dest2" ] \
+    && ok "set-mirror sets the second copy" || no "set-mirror: $(tail -1 "$t67/sm.out")"
+  as67 mkdir -p "$h67/.config/rclone"
+  as67 sh -c "printf '[box67]\ntype = s3\nsecret_access_key = SEKRET67\n\n[nas67]\ntype = sftp\nhost = h\npass = SEKRET67\n' > '$h67/.config/rclone/rclone.conf'"
+  tc67 remote list --json >"$t67/rl.json" 2>/dev/null || true
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert {(r["name"],r["type"]) for r in d}=={("box67","s3"),("nas67","sftp")}, d' "$t67/rl.json" 2>/dev/null \
+    && ! grep -q SEKRET67 "$t67/rl.json" \
+    && ok "remote list names the remotes rclone has, and nothing from inside them" \
+    || no "remote list: $(head -c 300 "$t67/rl.json")"
+
+  # e) the whole path, as root for the account: backup, list, verify, restore, drill
+  tc67 backup >"$t67/b1.out" 2>&1; rc67=$?
+  kit67="$(ls "$h67/docs/kits"/timecrate-*.tar.zst.gpg 2>/dev/null | head -1)"
+  [ "$rc67" = 0 ] && [ -n "$kit67" ] && [ "$(stat -c %U "$kit67")" = "$u67" ] \
+    && ls "$t67/dest2"/timecrate-*.tar.zst.gpg >/dev/null 2>&1 \
+    && ok "backup: the kit lands in the folder and in the second copy, written by the account" \
+    || no "backup as root for the account: $(tail -2 "$t67/b1.out" | tr '\n' '|')"
+  grep -q "git gap: $h67/proj has NO remote" "$t67/b1.out" && ! grep -q t67repo "$t67/b1.out" \
+    && ok "the git watch list is checked as the account, and root expands no pattern from it" \
+    || no "git watch: $(grep 'git gap' "$t67/b1.out" | tr '\n' '|')"
+  head -n1 "${kit67:-/dev/null}" 2>/dev/null | grep -q '^TIMECRATE-PQ1 ' \
+    && ok "...and it is a hybrid kit" || no "the kit is not hybrid"
+  [ -s "$s67/expected" ] && [ -z "$(find "$s67" ! -user "$u67" 2>/dev/null | head -1)" ] \
+    && ok "status, history and the anti-rollback anchor are the account's own files" \
+    || no "state files: $(ls -la "$s67" 2>&1 | tail -6 | tr '\n' '|')"
+  [ "$(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')" = 1 ] \
+    && ok "list reads the folder" || no "list: $(tc67 list 2>&1 | tail -1)"
+  sleep 1; tc67 backup >"$t67/b2.out" 2>&1 || true        # a second kit, a second later so its name differs
+  tc67 verify --all >"$t67/va.out" 2>&1 && grep -q 'VERIFY OK: 2/2' "$t67/va.out" \
+    && ok "verify --all authenticates both kits" || no "verify --all: $(tail -2 "$t67/va.out" | tr '\n' '|')"
+  ts67="$(tc67 list 2>/dev/null | grep 'tar\.zst\.gpg' | tail -1 | sed 's/^[a-z]*-//; s/\.tar.*//')"
+  tc67 restore "$ts67" >"$t67/r.out" 2>&1 || true
+  ext67="$(find "$t67/staging" -type d -path "*extracted$h67/docs" 2>/dev/null | head -1)"
+  [ -n "$ext67" ] && cmp -s "$ext67/a.bin" "$h67/docs/a.bin" \
+    && ok "restore fetches, authenticates and extracts it" || no "restore: $(tail -2 "$t67/r.out" | tr '\n' '|')"
+  [ -n "$ext67" ] && [ ! -e "$ext67/kits" ] \
+    && ok "a destination folder inside the backed-up tree is left out of the kit" \
+    || no "last night's kits were archived into tonight's: $(ls "$ext67/kits" 2>/dev/null | head -2 | tr '\n' ' ')"
+  tc67 recovery-drill >"$t67/d.out" 2>&1 && grep -q 'RECOVERY DRILL PASSED' "$t67/d.out" \
+    && grep -Eq 'remote sweep: ([0-9]+) kits, \1 signature-verified and listed$' "$t67/d.out" \
+    && ok "the drill passes, and its sweep lists every archive it authenticates" \
+    || no "drill: $(grep -E 'sweep|DRILL' "$t67/d.out" | tail -2 | tr '\n' '|')"
+
+  # f) rclone and gpg run as the account, and root's secrets do not travel with them
+  cat > /usr/local/bin/rclone <<'FAKE'
+#!/bin/bash
+{ id -un; env | grep -c '^T67_ALERT_TOKEN='; env | grep '^RCLONE_TPSLIMIT='; } > "$HOME/rclone-saw" 2>&1
+exit 0
+FAKE
+  chmod 755 /usr/local/bin/rclone
+  tc67 list >/dev/null 2>&1 || true
+  rm -f /usr/local/bin/rclone
+  [ "$(sed -n 1p "$h67/rclone-saw" 2>/dev/null)" = "$u67" ] \
+    && ok "rclone runs as the account, not as root" || no "rclone ran as: $(sed -n 1p "$h67/rclone-saw" 2>/dev/null || echo '?')"
+  [ "$(sed -n 2p "$h67/rclone-saw" 2>/dev/null)" = 0 ] && [ "$(sed -n 3p "$h67/rclone-saw" 2>/dev/null)" = RCLONE_TPSLIMIT=7 ] \
+    && ok "what the root-only env file sets stays with root, except rclone's own settings" \
+    || no "environment reaching the account: $(tr '\n' '|' < "$h67/rclone-saw" 2>/dev/null)"
+  printf '#!/bin/sh\nid -u >> %s/agent-ran-as\nexec /usr/bin/gpg-agent "$@"\n' "$h67" > "$t67/fake-agent"; chmod 755 "$t67/fake-agent"
+  as67 sh -c "echo 'agent-program $t67/fake-agent' >> '$g67/gpg.conf'; gpgconf --homedir '$g67' --kill gpg-agent" >/dev/null 2>&1
+  sleep 1; tc67 backup >"$t67/b3.out" 2>&1 || true
+  [ -s "$h67/agent-ran-as" ] && ! grep -qx 0 "$h67/agent-ran-as" \
+    && ok "a program named in the account's gpg.conf runs as the account, never as root" \
+    || no "agent-program ran as uid: $(tr '\n' ' ' < "$h67/agent-ran-as" 2>/dev/null || echo 'never — the check did not exercise it')"
+  as67 sh -c "sed -i '/agent-program/d' '$g67/gpg.conf'; gpgconf --homedir '$g67' --kill gpg-agent" >/dev/null 2>&1
+
+  # g) what 3.1.3 left behind: root's gpg-agent, alive, with its socket root-owned in the keyring
+  gpg --homedir "$g67" --batch --no-tty -K >/dev/null 2>&1 || true
+  if [ "$(stat -c %U "$g67/S.gpg-agent" 2>/dev/null)" = root ]; then
+    sleep 1; tc67 backup >"$t67/b4.out" 2>&1 \
+      && ok "root's leftover agent socket in the keyring does not stop the account's gpg" \
+      || no "backup failed behind root's leftover agent socket: $(tail -2 "$t67/b4.out" | tr '\n' '|')"
+  else ok "root's agent did not put its socket in the keyring here (skipped)"; fi
+
+  # h) names in the account's home that point elsewhere: root neither reads nor writes through them
+  echo topsecret67 > "$t67/secret"; chmod 600 "$t67/secret"; cp /etc/passwd "$t67/passwd.before"
+  as67 sh -c "cd '$s67' && rm -f expected status.json && ln -s '$t67/secret' expected && ln -s /etc/passwd status.json"
+  tc67 status --json >"$t67/st.json" 2>&1 || true
+  sleep 1; tc67 backup >"$t67/b5.out" 2>&1 || true
+  grep -rq topsecret67 "$t67/st.json" "$t67/b5.out" "$s67" 2>/dev/null \
+    && no "a root-only file was read through a link in the account's home" \
+    || ok "a link to a root-only file shows the account nothing"
+  cmp -s /etc/passwd "$t67/passwd.before" && [ "$(cat "$t67/secret")" = topsecret67 ] \
+    && ok "...and root writes nothing through a link there" || no "root WROTE through a link in the account's home"
+
+  # i) a state directory an older release left root-owned is handed back -- and only that one
+  chown -R root: "$s67"; chmod 755 "$s67"
+  tc67 status >/dev/null 2>&1 || true
+  [ -z "$(find "$s67" ! -user "$u67" 2>/dev/null | head -1)" ] \
+    && ok "a root-owned state directory inside the home is handed to the account" \
+    || no "state not handed over: $(ls -la "$s67" | tail -5 | tr '\n' '|')"
+  : > "$t67/rs/timecrate/log"
+  as67 sh -c "mv '$h67/.local/state' '$h67/.local/state.real' && ln -s '$t67/rs' '$h67/.local/state'"
+  tc67 status >/dev/null 2>&1 || true
+  [ "$(stat -c %U "$t67/rs/timecrate")" = root ] && [ "$(stat -c %U "$t67/rs/timecrate/log")" = root ] \
+    && ok "a root-owned directory reached through a link the account made is NOT handed over" \
+    || no "PRIVILEGE ESCALATION: root chowned $t67/rs/timecrate through the account's link"
+  as67 sh -c "rm -f '$h67/.local/state' && mv '$h67/.local/state.real' '$h67/.local/state'"
+
+  # j) a setting that reaches a command line is a number, or the run stops
+  TIMECRATE_ZSTD_LONG='27 --rm' tc67 backup --no-upload >"$t67/z.out" 2>&1 \
+    && no "a zstd window that is not a number was accepted" \
+    || { grep -q 'must be plain integers' "$t67/z.out" && ok "a zstd setting that is not a number is refused" \
+         || no "wrong refusal: $(tail -1 "$t67/z.out")"; }
+
+  # k) the monthly wrapper's alert carries the drill's own reason: it no longer runs a second
+  # pass over the whole archive to find one
+  mkdir -p "$t67/w/bin"
+  sed "s#/etc/timecrate/timecrate.conf#$t67/w/none.conf#g; s#/etc/timecrate.env#$t67/w/none.env#g" \
+    "$REPO/deploy/drill-and-alert.sh" > "$t67/w/drill-and-alert.sh"
+  printf '#!/bin/sh\ncat > %s/w/alert.body\n' "$t67" > "$t67/w/alert.sh"
+  cat > "$t67/w/bin/timecrate" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$(dirname "$0")/calls"
+echo "x [timecrate][ERROR] RECOVERY DRILL FAILED — 1 kit(s) on the remote did not authenticate. FIX ESCROW/SIGNING/REMOTE BEFORE TRUSTING IT."
+exit 1
+STUB
+  chmod 755 "$t67/w/alert.sh" "$t67/w/bin/timecrate"
+  env "${t67clean[@]}" PATH="$t67/w/bin:$PATH" bash "$t67/w/drill-and-alert.sh" >/dev/null 2>&1
+  grep -q 'the drill FAILED — 1 kit(s) on the remote did not authenticate' "$t67/w/alert.body" 2>/dev/null \
+    && ok "the drill alert says why the drill failed" || no "drill alert: $(head -c 300 "$t67/w/alert.body" 2>/dev/null)"
+  [ "$(cat "$t67/w/bin/calls" 2>/dev/null)" = recovery-drill ] \
+    && ok "...from one pass: the wrapper calls the engine once" || no "the wrapper called the engine: $(tr '\n' '|' < "$t67/w/bin/calls" 2>/dev/null)"
+
+  as67 gpgconf --homedir "$g67" --kill gpg-agent >/dev/null 2>&1 || true
+fi
+[ "$made67" = 1 ] && userdel -rf "$u67" >/dev/null 2>&1
+rm -rf "$t67" /root/t67repo
 
 echo "==== RESULT: $PASS PASS / $FAIL FAIL ===="
 [ "$FAIL" -eq 0 ]
