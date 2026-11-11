@@ -56,26 +56,21 @@ fi
 OUT="$("$TC" recovery-drill ${KEYFILE:+"$KEYFILE"} 2>&1)"; RC=$?
 printf '%s\n' "$OUT"
 
-{ [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'RECOVERY DRILL PASSED'; } \
-  || critical="the drill FAILED to decrypt the latest cloud kit"
+# The drill proves the NEWEST kit with the escrowed key, then sweeps every other kit on the remote
+# -- fetch, decrypt, signature, archive listing -- because GFS retention holds kits for up to three
+# years and the one you reach for in a real disaster is whichever predates the damage. Its last
+# line says which of the two failed.
+if ! { [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'RECOVERY DRILL PASSED'; }; then
+  why="$(printf '%s' "$OUT" | sed -n 's/.*RECOVERY DRILL FAILED — \(.*\)\. FIX ESCROW.*/\1/p' | tail -1 | cut -c1-500)"
+  critical="the drill FAILED — ${why:-the latest cloud kit did not decrypt and verify}"
+fi
 printf '%s' "$OUT" | grep -q 'DRILL STALE' \
   && critical="${critical:+$critical; }the newest cloud kit is STALE (daily backups may have stopped)"
 
-# The drill above proves the NEWEST kit decrypts. But GFS retention holds kits for up to three
-# years, and the one you reach for in a real disaster is whichever predates the damage — so the
-# tip being good says nothing about the kit you will actually need. Verify every kit on the
-# remote. `verify --all` dies on any failure, so its exit code is the whole check; measured at
-# ~3s/kit (45s for 15) against a cloud remote, which is noise beside the drill this runs next to.
-# Unprivileged on purpose: verify stages into the caller's own cache, and the keyring is the
-# user's. HOME is passed explicitly rather than trusted from sudo's env policy.
-VOUT="$(sudo -u "$TC_USER" env HOME="$USER_HOME" timeout 3600 "$TC" verify --all 2>&1)"; VRC=$?
-printf '%s\n' "$VOUT" | tail -3
-if [ "$VRC" -eq 124 ]; then
-  critical="${critical:+$critical; }verify --all TIMED OUT — the archive could not be checked this run"
-elif [ "$VRC" -ne 0 ]; then
-  critical="${critical:+$critical; }$(printf '%s' "$VOUT" | grep -E 'VERIFY FAILED' | tail -1 \
-    || echo 'not every cloud kit verifies')"
-fi
+# No second pass over the archive here. This used to run `verify --all` after the drill, which
+# fetched and decrypted every kit a second time: with long retention that is the whole archive
+# downloaded twice a month, under a one-hour limit it would in time stop fitting in. The drill's
+# own sweep now checks the archive listing too, so one download per kit covers both.
 
 # Off-box escrow survival: a wipe destroys the on-box key; verify a wipe-surviving copy still
 # matches. Skipped on a hardened box (no on-box file left to compare against — the drill above
@@ -84,7 +79,7 @@ fi
 # `timecrate harden` checks before it shreds the on-box key. Unset = this check is skipped.
 if [ -f "$SEC" ] && [ -n "${TIMECRATE_ESCROW_SSH:-}" ]; then
   ESC_PATH="${TIMECRATE_ESCROW_SSH_PATH:-.timecrate/timecrate-secret.asc}"
-  src="$(sha256sum "$SEC" 2>/dev/null | cut -d' ' -f1)"   # service runs as root; $SEC is root-readable
+  src="$(sudo -u "$TC_USER" sha256sum "$SEC" 2>/dev/null | cut -d' ' -f1)"   # the account's file, read as the account
   idargs=(); [ -n "${TIMECRATE_ESCROW_SSH_KEY:-}" ] && idargs=(-i "$TIMECRATE_ESCROW_SSH_KEY")
   off="$(timeout 15 sudo -u "$TC_USER" ssh "${idargs[@]}" -o BatchMode=yes -o ConnectTimeout=8 \
           "$TIMECRATE_ESCROW_SSH" \

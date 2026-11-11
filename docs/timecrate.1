@@ -1,4 +1,4 @@
-.TH TIMECRATE 1 "2026-11-02" "timecrate 3.1.3" "System Administration"
+.TH TIMECRATE 1 "2026-11-11" "timecrate 3.2.0" "System Administration"
 .SH NAME
 timecrate \- encrypted, signed, off\-site disaster\-recovery backup
 .SH SYNOPSIS
@@ -96,9 +96,18 @@ here.
 .B status " [\-\-json]"
 Report the live state: remote, kit count, last backup, key, escrow and last drill. Needs no root.
 .TP
-.B config
+.B config " [\fBget\fR \fINAME\fR | \fBset\-user\fR \fIlogin\fR]"
 Print every effective setting and which file it came from. Run this first whenever the tool and
 you disagree about how it is configured.
+.B get
+prints one resolved setting, for scripts.
+.B set\-user
+names the account whose home is backed up and whose keys and rclone configuration are used
+.RB ( TIMECRATE_USER
+in the system configuration). Needs root. Until it is set a scheduled backup has no account to
+act for, and
+.B status
+says so.
 .TP
 .B schedule " [\fIbackup\fR|\fIdrill\fR \fIon\fR|\fIoff\fR [\-\-at \fIOnCalendar\fR]]"
 With no arguments, report whether each timer is enabled, when it runs and when it runs next.
@@ -112,11 +121,24 @@ working until the day you need a restore.
 The package enables and starts the backup, drill and capstone timers when it is installed, and
 an upgrade leaves each one as it was; the capstone is skipped on a machine without multipass.
 .TP
+.B pause " [\fIduration\fR|\fBoff\fR]"
+Skip scheduled backups until a deadline \(em
+.BR 90m ,
+.BR 24h ,
+.BR 3d ,
+at most 30 days \(em or clear the pause. With no argument, report it. Needs root. A duration is
+required: a pause with no end is how a backup quietly stops existing. The recovery drill keeps
+running,
+.B status
+says PAUSED throughout, and
+.B "backup \-\-force"
+runs anyway.
+.TP
 .B recovery\-drill " [\fIkey\fR] [\fIts\fR]"
 Prove recovery actually works. Imports only the escrowed key into a throwaway keyring \(em the
 wiped\-OS scenario \(em fetches a real kit from the remote, and decrypts and authenticates it.
-Also sweeps every kit on the remote for signature validity and checks the remote against the
-recorded anchor for deletion or rollback.
+Also fetches every other kit on the remote, authenticates it and lists its archive, and checks
+the remote against the recorded anchor for deletion or rollback.
 .TP
 .B demo
 Self\-test the whole crypto and fidelity pipeline offline in a throwaway keyring, including a
@@ -174,10 +196,26 @@ One level of folders, for choosing one.
 .TP
 .B mkdir " \fIremote:path\fR"
 .TP
-.B set-path " \fIremote:path\fR [\fB\-\-yes\fR]"
-Repoint future backups. Prints the backup count at both ends first and warns when the current path
-holds backups the new one does not; they are neither moved nor deleted. The previous configuration
-is kept alongside as \fI.bak\fR.
+.B list " [\fB\-\-json\fR]"
+The remotes rclone already has for this account, by name and backend. Any of them can be a
+destination. Nothing from inside a remote's configuration is printed.
+.TP
+.B set-path " \fIremote:path\fR|\fIfolder\fR [\fB\-\-yes\fR] [\fB\-\-dry\-run\fR]"
+Repoint future backups: at an rclone remote, or at a folder on this machine given as an absolute
+path \(em an attached drive, a mounted share, a folder another program syncs. Prints the backup
+count at both ends first and warns when the current path holds backups the new one does not; they
+are neither moved nor deleted. The previous configuration is kept alongside as \fI.bak\fR.
+A folder must exist and be writable by the configured account. It is never created on the way to
+a backup: a drive that is not mounted stops the run, instead of being replaced by a directory on
+the disk the backup is meant to survive. The kits in a destination folder are left out of later
+kits; anything else in that folder is backed up as usual.
+.TP
+.B set-mirror " \fIremote:path\fR|\fIfolder\fR|\fBoff\fR [\fB\-\-yes\fR]"
+Send a second copy of every new kit somewhere else
+.RB ( TIMECRATE_REMOTE2 ),
+pruned on its own schedule, or stop doing so. Kits made earlier are not copied there, and
+.B off
+leaves the ones already there untouched.
 .TP
 .B disconnect " [\fB\-\-remove\-rclone\-remote\fR] [\fB\-\-yes\fR]"
 Forget the remote on this machine. Does not touch the backups and does not revoke access at the
@@ -246,11 +284,46 @@ The environment \(em
 .IP 4. 4
 .I /etc/timecrate/timecrate.conf
 .PP
-Every entry point reads all four, including the systemd timers and the GUI. Each setting is a
-shell assignment named
+Every entry point reads all four, including the systemd timers and the GUI. Each setting is
+named
 .BI TIMECRATE_ NAME\fR.
 .B timecrate config
 prints the resolved values with their source.
+.PP
+The two files in
+.I /etc
+are shell assignments, read by root. The per\-user file belongs to the account, so it is read as
+plain
+.IB NAME = value
+lines and never executed, and only these settings are taken from it:
+.BR TIMECRATE_REMOTE ,
+.BR TIMECRATE_REMOTE2 ,
+.BR TIMECRATE_CRYPTO ,
+.BR TIMECRATE_KEEP ,
+.BR TIMECRATE_KEEP_MONTHLY ,
+.BR TIMECRATE_KEEP_YEARLY ,
+.BR TIMECRATE_MIN_MB ,
+.BR TIMECRATE_MAX_MB ,
+.BR TIMECRATE_ZSTD_LEVEL ,
+.BR TIMECRATE_ZSTD_LONG
+and
+.BR TIMECRATE_GIT_WATCH .
+Anything else there is ignored with a warning: commands, paths and the include and exclude
+lists are the administrator's to set, in
+.IR /etc/timecrate/timecrate.conf .
+.PP
+The engine runs as root for one account
+.RB ( TIMECRATE_USER ).
+rclone, and GnuPG on that account's keyring, run as the account, with root's environment less
+whatever
+.I /etc/timecrate.env
+sets \(em except names starting with
+.BR RCLONE_ ,
+which are rclone's own. A credential rclone needs therefore goes in the account's rclone
+configuration, or in
+.I /etc/timecrate.env
+as
+.BI RCLONE_CONFIG_ REMOTE _ OPTION\fR.
 .SH ALERTS
 A failed backup, drill or capstone is always written to the system journal. To be told anywhere
 else, set
@@ -316,7 +389,9 @@ Kits are materialised and verified before anything is extracted, never streamed 
 .BR tar .
 .TP
 .B Anti\-rollback
-Each upload records the expected newest kit and count. Restoring anything older needs
+Each upload records the expected newest kit and count, and the destination they are for: a
+changed destination starts a new count, and a listing that fails is reported as not checked
+rather than as kits deleted. Restoring anything older needs
 .BR \-\-force ,
 and the backup and drill both alert on unexpected deletion or rollback on the remote \(em an old
 kit carries a perfectly valid signature, so signing alone cannot catch this.
@@ -340,6 +415,10 @@ Patterns pruned from inside the included paths.
 .TP
 .I /etc/timecrate.env
 Root\-only secrets, mode 0600. The systemd units load it too.
+.TP
+.I ~/.config/timecrate/timecrate.conf
+The account's own settings; the window writes it. Read as settings, never run. See
+.BR CONFIGURATION .
 .TP
 .I ~/.config/timecrate/
 Keyring, escrow file and pinned signing fingerprint.
@@ -380,7 +459,7 @@ and
 .I MIGRATING.md
 in
 .IR /usr/share/doc/timecrate/ ,
-and https://github.com/spencercnorton/timecrate
+and https://github.com/spencernorton/timecrate
 .SH BUGS
 The disaster this tool exists for is the one you cannot rehearse by reading. Run
 .B recovery\-drill

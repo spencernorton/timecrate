@@ -1,6 +1,6 @@
 [Unit]
 Description=Timecrate quarterly capstone (rebuild a machine from a kit, in a real booted VM)
-Documentation=man:timecrate(1) https://github.com/spencercnorton/timecrate/blob/main/docs/RESTORE.md
+Documentation=man:timecrate(1) https://github.com/spencernorton/timecrate/blob/main/docs/RESTORE.md
 After=network-online.target
 Wants=network-online.target
 # systemd only honours OnFailure in [Unit]; in [Service] it is silently ignored and the quarterly

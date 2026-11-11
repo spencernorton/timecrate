@@ -49,20 +49,23 @@ for f in /etc/timecrate/timecrate.conf /etc/timecrate.env; do
 done
 TC_USER="${TIMECRATE_USER:-$(id -un)}"
 USER_HOME="$(getent passwd "$TC_USER" | cut -d: -f6)"
-# The per-user file too, as the engine reads it: the window's Remote page writes the destination
-# there, and a capstone that listed kits through the engine but fetched them from the built-in
-# default would be rebuilding from nothing.
-# shellcheck disable=SC1090
-[ -n "$USER_HOME" ] && [ -r "$USER_HOME/.config/timecrate/timecrate.conf" ] \
-  && { set -a; . "$USER_HOME/.config/timecrate/timecrate.conf"; set +a; }
 for _v in $(compgen -v | grep '^TIMECRATE_' || true); do
   printf '%s\n' "$_tc_preset" | grep -qxF "$_v" || export -n "${_v?}"
 done
-CONF="${TIMECRATE_CONF:-$USER_HOME/.config/timecrate}"
-RCONF="${TIMECRATE_RCLONE_CONF:-$USER_HOME/.config/rclone/rclone.conf}"
-REMOTE="${TIMECRATE_REMOTE-dropbox:TIMECRATE}"   # the engine's own default
-if [ "${REMOTE%%:*}" = "${TIMECRATE_DRIVE_REMOTE:-gdrive}" ]; then
-  RCONF="${TIMECRATE_DRIVE_CONF:-$CONF/rclone-drive.conf}"
+# Where the kits are, and which rclone config reaches them, is the ENGINE's answer. The window's
+# Remote page writes the destination to the per-user file, and a capstone that listed kits through
+# the engine but fetched them from somewhere else would be rebuilding from nothing -- but that file
+# belongs to the account, and this script used to source it as root. The engine reads it as
+# settings, so ask the engine.
+tcget(){ timeout 60 "$TC" config get "$1" 2>/dev/null; }
+# (the fallbacks are this script's own reading of the two root-owned files, for an engine that
+# does not answer)
+CONF="$(tcget CONF_DIR)";     CONF="${CONF:-${TIMECRATE_CONF:-$USER_HOME/.config/timecrate}}"
+RCONF="$(tcget RCLONE_CONF)"; RCONF="${RCONF:-${TIMECRATE_RCLONE_CONF:-$USER_HOME/.config/rclone/rclone.conf}}"
+REMOTE="$(tcget REMOTE)";     REMOTE="${REMOTE:-${TIMECRATE_REMOTE-dropbox:TIMECRATE}}"
+DRIVE="$(tcget DRIVE_REMOTE)"; DRIVE="${DRIVE:-${TIMECRATE_DRIVE_REMOTE:-gdrive}}"
+if [ "${REMOTE%%:*}" = "$DRIVE" ]; then
+  RCONF="$(tcget DRIVE_CONF)"; RCONF="${RCONF:-${TIMECRATE_DRIVE_CONF:-$CONF/rclone-drive.conf}}"
 fi
 WORK=""
 
@@ -79,8 +82,16 @@ INFRA=0
 # root-run `multipass launch` fails with "client is not authenticated" even though the daemon is
 # running and the same command works as TC_USER. Same shape as the rclone config, same answer:
 # do the user-context work as the user. Mirrors rc() in the engine.
+# What runs as the account does not get /etc/timecrate.env: this script holds it (the unit's
+# EnvironmentFile, and the loop above), and it is root-only because it carries what the alert and
+# escrow-key commands need. Every name that file sets is dropped on the way, as the engine does;
+# rclone's own RCLONE_* settings still cross, since rclone is what runs there.
+_TC_ASUSER_DROP=()
+while IFS= read -r _v; do
+  case "$_v" in ''|PWD|OLDPWD|SHLVL|_|PATH|RCLONE_*) ;; *) _TC_ASUSER_DROP+=(-u "$_v");; esac
+done < <(env -i bash -c 'set -a; . "$1" >/dev/null 2>&1; compgen -e' _ /etc/timecrate.env 2>/dev/null || true)
 asuser(){
-  if [ "$(id -u)" = 0 ]; then runuser -u "$TC_USER" -- env HOME="$USER_HOME" "$@"
+  if [ "$(id -u)" = 0 ]; then runuser -u "$TC_USER" -- env "${_TC_ASUSER_DROP[@]}" HOME="$USER_HOME" "$@"
   else "$@"; fi
 }
 # EVERY multipass call is bounded here rather than at each call site. An unbounded `multipass
@@ -219,7 +230,9 @@ command -v multipass >/dev/null 2>&1 || fail "multipass not installed"
 command -v runuser   >/dev/null 2>&1 || fail "runuser not available (needed to drop to $TC_USER)"
 [ -n "$USER_HOME" ] && [ -d "$USER_HOME" ] || fail "cannot resolve a home for TC_USER=$TC_USER"
 [ -r "$CONF/timecrate-secret.asc" ] || fail "no escrowed secret key at $CONF/timecrate-secret.asc"
-[ -r "$RCONF" ] || fail "no rclone config at $RCONF"
+# a folder destination (an attached drive, a NAS mount) needs no rclone config at all, and must
+# not open one: a config that is password-encrypted would stop the fetch to ask for it
+case "$REMOTE" in /*) RCONF=/dev/null;; *) [ -r "$RCONF" ] || fail "no rclone config at $RCONF";; esac
 
 # Resolve the in-VM script ONCE, from a candidate list, and require it to exist. The previous
 # version chained transfers and trusted their exit codes; this decides the source up front so a
@@ -261,7 +274,9 @@ WORK="$(asuser mktemp -d "$USER_HOME/timecrate-capstone-work.XXXXXX")" && [ -d "
 # "rebuild from the OLDEST kit" silently rebuilt the newest one on every run it ever made — the
 # one assurance that older retained kits are still restorable never actually executed.
 KIT_SEL="${TIMECRATE_CAPSTONE_KIT:-newest}"
-KIT_LIST="$(rem "$TC" list 2>/dev/null)" || fail "could not list kits on $REMOTE within the remote timeout"
+# through the engine as this script runs it, so the list and REMOTE above are one reading of the
+# configuration; the engine itself hands rclone to the account
+KIT_LIST="$(timeout "${TIMECRATE_CAPSTONE_REMOTE_TIMEOUT:-900}" "$TC" list 2>/dev/null)" || fail "could not list kits on $REMOTE within the remote timeout"
 case "$KIT_SEL" in
   newest) KIT="$(printf '%s\n' "$KIT_LIST" | tail -1)" ;;
   oldest) KIT="$(printf '%s\n' "$KIT_LIST" | head -1)" ;;

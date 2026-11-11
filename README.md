@@ -42,8 +42,8 @@ A rebuilt machine gets its packages from the manifest and the rest from the kit.
 
 **One small kit a night.** `tar` over the paths you list, `zstd` with a long window on every core,
 then GnuPG: encrypted to your key with AES-256 and signed by a separate key. The kit goes to any
-rclone remote — Dropbox, Google Drive, B2, S3, SFTP, a local disk — and, if you want 3-2-1, is
-mirrored to a second provider.
+rclone remote — Dropbox, Google Drive, B2, S3, SFTP — or to a folder on an attached drive or a
+mounted share, and, if you want 3-2-1, is mirrored to a second place.
 
 **Restores check before they write.** Every path that extracts a kit verifies its signature before
 a single byte lands on disk, so someone with write access to your remote cannot plant an archive
@@ -96,12 +96,22 @@ Upgrading a machine that runs the packages from before 3.0.0? Follow
 
 ## Set it up
 
-1. **Say whose machine it is.** In `/etc/timecrate/timecrate.conf` set `TIMECRATE_USER` to the
-   account whose home is backed up, and look over `/etc/timecrate/include` — the default is a
-   starting point, not a survey of your machine. `sudo timecrate backup --dry-run` shows what a kit
-   would hold, and `timecrate coverage` what nothing covers.
-2. **Connect a remote**, as that user: `timecrate remote connect` (Dropbox by default; any rclone
-   backend with `--provider`), then `timecrate remote set-path <remote:path>`.
+1. **Say whose machine it is.** `sudo timecrate config set-user <login>` names the account whose
+   home is backed up and whose keys are used; until it is set, the nightly backup has nobody to
+   act for. Then look over `/etc/timecrate/include` — the default is a starting point, not a
+   survey of your machine. `sudo timecrate backup --dry-run` shows what a kit would hold, and
+   `timecrate coverage` what nothing covers.
+2. **Choose where the kits go**, as that user. One of:
+   - a cloud account: `timecrate remote connect` (Dropbox by default, `--provider drive` for
+     Google Drive, any other rclone backend by name), then
+     `timecrate remote set-path <remote:path>`;
+   - a remote rclone already knows: `timecrate remote list`, then `set-path <name>:<path>`;
+   - a folder: `timecrate remote set-path /media/you/drive/TIMECRATE` — an attached drive, a
+     mounted share, or a folder another program syncs. It has to exist and be writable by that
+     user, and a drive that is not mounted stops the backup rather than being quietly replaced
+     by a directory on the disk you are backing up.
+
+   For a second copy somewhere else: `timecrate remote set-mirror <remote:path>|<folder>`.
 3. **Make the keys**, as that user: `timecrate init`. Then escrow the secret key **off this machine**
    — `timecrate escrow-doc` writes a printable sheet with a QR code, `timecrate export-key` a file.
    It is deliberately not in the backups: without an escrowed copy, the kits are unrecoverable.
@@ -149,8 +159,9 @@ your password manager or secret store lets the drill prove the off-box copy, and
 | Path | Purpose |
 |---|---|
 | `/etc/timecrate/timecrate.conf` | Settings (world-readable: never credentials) |
+| `~/.config/timecrate/timecrate.conf` | The account's own settings: destination, second copy, retention, kit posture. Read as settings, never run |
 | `/etc/timecrate/include`, `/etc/timecrate/exclude` | What goes into a kit, and what is pruned from it |
-| `/etc/timecrate.env` | Root-only secrets, mode 0600, for your alert or escrow-key command |
+| `/etc/timecrate.env` | Root-only secrets, mode 0600, for your alert or escrow-key command. Only its `RCLONE_*` settings reach rclone |
 | `~/.config/timecrate/` | The keyring, the escrow file and the pinned signing fingerprint — never in a kit |
 | `~/.config/rclone/rclone.conf` | rclone's own configuration and token — never in a kit |
 | `~/.local/state/timecrate/` | History, status and the anti-rollback anchor |

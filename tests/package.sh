@@ -68,11 +68,13 @@ inside(){
   echo "== P2: backup, list, verify, restore and prune from the installed package =="
   useradd -m alice
   mkdir -p /home/alice/data/sub /home/alice/data/cache /srv/remote
+  chown alice: /srv/remote    # a folder destination is written by the account, never by root
   printf 'hello\n' > /home/alice/data/a.txt; printf 'deep\n' > "/home/alice/data/sub/with space.txt"
   printf 'junk\n' > /home/alice/data/scratch.tmp; printf 'cached\n' > /home/alice/data/cache/blob
   ln -s a.txt /home/alice/data/link; chown -R alice: /home/alice/data
+  timecrate config set-user alice >/dev/null 2>&1 && grep -q '^TIMECRATE_USER=alice$' /etc/timecrate/timecrate.conf \
+    && ok "config set-user pins the account in the shipped configuration" || no "config set-user did not pin the account"
   cat >> /etc/timecrate/timecrate.conf <<'CONF'
-TIMECRATE_USER=alice
 TIMECRATE_REMOTE=/srv/remote
 TIMECRATE_MIN_MB=0
 CONF
@@ -108,7 +110,7 @@ CONF
          && ok "the installed backup unit runs a backup, sandbox and all" || no "the backup unit did not complete"; }
   systemctl start timecrate-drill.service; systemctl is-failed --quiet timecrate-drill.service \
     && no "the drill unit failed: $(journalctl -u timecrate-drill.service -n 8 --no-pager)" \
-    || ok "the installed drill unit passes (drill and verify --all)"
+    || ok "the installed drill unit passes (the drill, sweep included)"
 
   echo "== P3: a failure reaches the alert command, from the run and from OnFailure= =="
   cat > /usr/local/sbin/test-alert <<'HOOK'
@@ -196,7 +198,7 @@ NAME="tc-package-$$"
 debs=(); [ -n "${1:-}" ] && debs=(--mount "type=bind,src=$(cd "$1" && pwd),dst=/debs,readonly" -e DEBS=1)
 trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT
 docker run -d --rm --name "$NAME" --pids-limit 4096 --cap-add SYS_ADMIN --security-opt apparmor=unconfined --cgroupns=private \
-  --tmpfs /run --tmpfs /run/lock --mount "type=bind,src=$REPO,dst=/src,readonly" "${debs[@]}" "$IMAGE" \
+  --tmpfs /run --tmpfs /run/lock --mount "type=bind,src=$REPO,dst=/src,readonly" ${debs[@]+"${debs[@]}"} "$IMAGE" \
   bash -c 'export DEBIAN_FRONTEND=noninteractive
            # Container images forbid starting services from package scripts (policy-rc.d, exit 101);
            # a real machine has no such file, and this test is about what a real machine does.

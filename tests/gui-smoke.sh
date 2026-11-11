@@ -34,6 +34,10 @@ GUI="$REPO/gui/timecrate-gui"
 mkdir -p /tmp/gs/bin
 cat > /tmp/gs/bin/timecrate <<'STUB'
 #!/bin/sh
+# every call is appended here when asked, so a test can assert on what the window sent
+[ -z "${TC_STUB_LOG:-}" ] || echo "$*" >> "$TC_STUB_LOG"
+# the engine warns on stderr, on any call (a setting it ignored, say): no view may read that as data
+echo "2026-07-29T03:00:00-06:00 [timecrate][WARN] stub: one warning on every call" >&2
 case "$1 $2" in
   "status --json") cat <<'J'
 {"version":"3.0.0","remote":"dropbox:Backup/TIMECRATE","remote2":"","cipher":"AES-256 (AES-NI)",
@@ -63,12 +67,22 @@ J
     fi ;;
   "remote status")
     if [ "$3" = "--json" ]; then
-      if [ -n "${TC_STUB_NOREMOTE:-}" ]; then
+      if [ -n "${TC_STUB_LOCAL:-}" ]; then
+        printf '{"remote":"/media/alice/Backup/TIMECRATE","name":"","type":"local","configured":true,"has_token":false,"token_expiry":"","account":"","reachable":true,"kits":"4","last_backup":"","rclone_config":"/x/rclone.conf","remote_quota_used":"1000","remote_quota_total":"2000"}\n'
+      elif [ -n "${TC_STUB_NOREMOTE:-}" ]; then
         printf '{"remote":"","name":"","type":"","configured":false,"has_token":false,"token_expiry":"","account":"","reachable":false,"kits":"","last_backup":"","rclone_config":"/x/rclone.conf","remote_quota_used":"","remote_quota_total":""}\n'
       else
         printf '{"remote":"dropbox:Backup/TIMECRATE","name":"dropbox","type":"dropbox","configured":true,"has_token":true,"token_expiry":"2027-01-01T00:00:00Z","account":"a@b.c","reachable":true,"kits":"13","last_backup":"2026-07-29T03:11:16-06:00","rclone_config":"/x/rclone.conf","remote_quota_used":"35060522191","remote_quota_total":"4412407808000"}\n'
       fi
     fi ;;
+  "remote list")
+    if [ -n "${TC_STUB_NOREMOTES:-}" ]; then echo '[]'
+    else printf '[{"name":"dropbox","type":"dropbox"},{"name":"nas","type":"sftp"}]\n'; fi ;;
+  "remote set-path"|"remote set-mirror")
+    case " $* " in
+      *" --dry-run "*) printf '[timecrate] DRY RUN: would repoint\n[timecrate] 13 backup(s) at the current path, 0 at %s\n' "$3" ;;
+      *) echo "[timecrate] done" ;;
+    esac ;;
   "remote browse")
     # path-dependent, so an interleaved reply is detectable
     case "$3" in
@@ -352,12 +366,11 @@ class Probe(Adw.Application):
                 if state["phase"] == 5:
                     row, choices = state["dlg2"].schedule_rows["backup"]
                     label = row.get_model().get_string(row.get_selected())
-                    if "04:17:00" not in label:
-                        failures.append("custom calendar '*-*-* 04:17:00' displayed as %r" % label)
-                    if choices[row.get_selected() - 1][0] != "*-*-* 04:17:00":
-                        failures.append("custom calendar would be saved as %r"
-                                        % (choices[row.get_selected() - 1][0],))
-                    if state["dlg2"]._schedule_baseline.get("backup") != row.get_selected():
+                    if label != "Daily at a time you choose" \
+                            or state["dlg2"].time_row.get_text() != "04:17":
+                        failures.append("calendar '*-*-* 04:17:00' displayed as %r at %r"
+                                        % (label, state["dlg2"].time_row.get_text()))
+                    if state["dlg2"]._schedule_baseline.get("backup") != (row.get_selected(), "04:17"):
                         failures.append("custom calendar not in the baseline — closing the dialog "
                                         "would silently rewrite the schedule")
                     del os.environ["TC_STUB_CUSTOM"]
@@ -712,6 +725,350 @@ else
   grep -E '^ASSERT' /tmp/gs/only.out
   no "settings/path-editor behaviour is wrong (above)"
 fi
+
+cat > /tmp/gs/schedonly.py <<'SCHEDONLY'
+"""A change to only the schedule rows must reach the privileged queue, and a bad entry must
+apply nothing. The save used to return early when no other setting had changed."""
+import importlib.util, importlib.machinery, os, sys, tempfile
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw, GLib
+
+d = tempfile.mkdtemp(); os.environ["XDG_CONFIG_HOME"] = d
+spec = importlib.util.spec_from_loader(
+    "tcgui", importlib.machinery.SourceFileLoader("tcgui", os.environ["GUI"]))
+tcgui = importlib.util.module_from_spec(spec); spec.loader.exec_module(tcgui)
+
+failures = []
+STATUS = {"remote": "dropbox:Backup/TIMECRATE", "keep": 14, "keep_monthly": 12,
+          "keep_yearly": 3, "min_mb": 25, "max_mb": 2000, "zstd_level": 19, "conf_sources": []}
+
+class Probe(Adw.Application):
+    def do_activate(self):
+        win = tcgui.Window(self)
+        queued = []
+        win.queue_privileged = lambda args, on_finished=None: queued.append(args)
+        dlg = tcgui.SettingsDialog(win, STATUS)
+
+        def step():
+            path = tcgui.user_config_path()
+            dlg.schedule_rows["backup"][0].set_selected(3)          # Weekly
+            dlg._save()
+            if queued != [["schedule", "backup", "on", "--at", "weekly"]]:
+                failures.append("a schedule-only change queued %r" % queued)
+            if os.path.exists(path):
+                failures.append("a schedule-only change also wrote the config file")
+            queued.clear()
+            dlg._save()
+            if queued:
+                failures.append("the same schedule change was queued twice: %r" % queued)
+            dlg.schedule_rows["drill"][0].set_selected(0)           # Off
+            dlg._save()
+            if queued != [["schedule", "drill", "off"]]:
+                failures.append("turning the drill off queued %r" % queued)
+            # an invalid size rail must apply nothing, schedule included
+            queued.clear()
+            dlg.schedule_rows["backup"][0].set_selected(4)          # Hourly
+            dlg.rows["TIMECRATE_MIN_MB"].set_value(5000)
+            dlg._save()
+            if queued or os.path.exists(path):
+                failures.append("a rejected save was half-applied: %r" % queued)
+            self.quit(); return False
+
+        GLib.timeout_add(900, step)
+
+app = Probe(application_id="dev.norvi.TimecrateSchedOnly")
+app.run([])
+for f in failures:
+    print("ASSERT " + f)
+sys.exit(1 if failures else 0)
+SCHEDONLY
+
+echo "== G7: a schedule-only change is saved, and a rejected save applies nothing =="
+if xvfb-run -a --server-args="-screen 0 900x700x24" python3 /tmp/gs/schedonly.py > /tmp/gs/sched.out 2>&1; then
+  ok "schedule changes reach the privileged queue with no other setting changed"
+else
+  grep -E '^ASSERT|Error' /tmp/gs/sched.out
+  no "a schedule-only change is lost or a rejected save is half-applied (above)"
+fi
+
+cat > /tmp/gs/features.py <<'FEATURES'
+"""Destinations, the second copy, the daily time, pause, the account pin and their allow-list."""
+import importlib.util, importlib.machinery, json, os, sys, tempfile
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw, GLib
+
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+spec = importlib.util.spec_from_loader(
+    "tcgui", importlib.machinery.SourceFileLoader("tcgui", os.environ["GUI"]))
+tcgui = importlib.util.module_from_spec(spec); spec.loader.exec_module(tcgui)
+
+failures = []
+finished = []       # a script that stops early must not read as a pass
+LOG = os.environ["TC_STUB_LOG"]
+LOCAL = "/media/alice/Backup/TIMECRATE"
+
+def sent():
+    with open(LOG, encoding="utf-8") as fh:
+        return [l.strip() for l in fh if l.startswith("remote set-")]
+
+def check(cond, msg):
+    if not cond:
+        failures.append(msg)
+
+class Probe(Adw.Application):
+    def do_activate(self):
+        win = tcgui.Window(self)
+        win.present()
+
+        def script():
+            while not win.status:
+                yield
+            base = dict(win.status)
+            queued = []
+            real_queue = win.queue_privileged
+            win.queue_privileged = lambda args, on_finished=None: queued.append(args)
+
+            # ---- F + E: banners on the main window
+            def feed(**kw):
+                win._on_status(True, json.dumps(dict(base, **kw)))
+            feed()
+            check(not win.pin_banner.get_revealed(), "pin banner shown with user_pinned missing")
+            feed(user_pinned=True)
+            check(not win.pin_banner.get_revealed(), "pin banner shown with user_pinned true")
+            check(not win.pause_banner.get_revealed(), "pause banner shown while not paused")
+            feed(user_pinned=False)
+            check(win.pin_banner.get_revealed(), "no pin banner with user_pinned false")
+            check("not tied to this account" in win.pin_banner.get_title(),
+                  "pin banner says %r" % win.pin_banner.get_title())
+            win.pin_banner.emit("button-clicked")
+            check(queued == [["config", "set-user", GLib.get_user_name()]],
+                  "pin button sent %r" % queued)
+            queued.clear()
+            feed(paused_until="2026-11-20T03:00:00-06:00")
+            check(win.pause_banner.get_revealed()
+                  and "paused until 2026-11-20 03:00:00" in win.pause_banner.get_title(),
+                  "pause not shown: %r" % win.pause_banner.get_title())
+            win.pause_banner.emit("button-clicked")
+            check(queued == [["pause", "off"]], "Resume sent %r" % queued)
+            queued.clear()
+            feed(paused_until="")
+            check(not win.pause_banner.get_revealed(), "pause banner stayed after the pause ended")
+
+            # ---- G: the privileged allow-list
+            for args, want in (
+                    (["pause", "3d"], True), (["pause", "90m"], True), (["pause", "24h"], True),
+                    (["pause", "30d"], True), (["pause", "off"], True),
+                    (["pause", "31d"], False), (["pause", "0d"], False), (["pause", "3"], False),
+                    (["pause", "3w"], False), (["pause", "-1d"], False), (["pause"], False),
+                    (["pause", "3d", "--force"], False), (["pause", "off", "x"], False),
+                    (["config", "set-user", "alice"], True),
+                    (["config", "set-user", "-rf"], False), (["config", "set-user", "a b"], False),
+                    (["config", "set-user", "a;b"], False), (["config", "set-user", ""], False),
+                    (["config", "set-user"], False), (["config", "set-user", "a", "b"], False),
+                    (["config", "show"], False)):
+                check(win._allowed_args(args) == want,
+                      "allow-list %s %r" % ("rejected" if want else "ACCEPTED", args))
+
+            # ---- D + E: the Schedule page, from a calendar the presets do not cover
+            os.environ["TC_STUB_CUSTOM"] = "1"
+            dlg = tcgui.SettingsDialog(
+                win, dict(base, paused_until="2026-11-20T03:00:00-06:00"))
+            yield; yield
+            del os.environ["TC_STUB_CUSTOM"]
+            row, _choices = dlg.schedule_rows["backup"]
+            labels = [row.get_model().get_string(i) for i in range(row.get_model().get_n_items())]
+            check(labels[row.get_selected()] == "Daily at a time you choose"
+                  and dlg.time_row.get_text() == "04:17" and dlg.time_row.get_visible(),
+                  "04:17:00 shown as %r / %r" % (labels[row.get_selected()], dlg.time_row.get_text()))
+            check(not any(l.startswith("Custom") for l in labels), "a Custom entry was added: %r" % labels)
+            check(dlg.pause_row.get_model().get_string(dlg.pause_row.get_selected()).startswith(
+                "Paused until 2026-11-20"), "running pause not shown on the Schedule page")
+            dlg._save()
+            check(queued == [], "an untouched dialog queued %r" % queued)
+            dlg.time_row.set_text("21:30")
+            dlg._save()
+            check(queued == [["schedule", "backup", "on", "--at", "*-*-* 21:30:00"]],
+                  "a new time queued %r" % queued)
+            queued.clear()
+            for bad in ("24:00", "12:60", "7", "ab:cd", ""):
+                dlg.time_row.set_text(bad)
+                dlg.pause_row.set_selected(2)                       # 3 days
+                dlg._save()
+                check(queued == [], "time %r was accepted (queued %r)" % (bad, queued))
+                queued.clear()
+            dlg.time_row.set_text("7:05")
+            dlg._save()
+            check(queued == [["schedule", "backup", "on", "--at", "*-*-* 07:05:00"], ["pause", "3d"]],
+                  "valid time + pause queued %r" % queued)
+            queued.clear()
+            dlg.pause_row.set_selected(0)
+            dlg._save()
+            check(queued == [["pause", "off"]], "Not paused queued %r" % queued)
+            queued.clear()
+            win.queue_privileged = real_queue
+
+            # ---- B: Remote page, default (dropbox) status
+            rp = dlg.remote_page
+            yield
+            row_p = rp.provider_row
+            kinds = [row_p.get_model().get_string(i) for i in range(row_p.get_model().get_n_items())]
+            check(kinds[2:] == ["Folder on this computer or an attached drive",
+                                "Another rclone remote"], "provider choices %r" % kinds)
+            # the shared confirm flow, through the real picker, before anything is replaced
+            done = []
+            pk = tcgui.FolderPicker(win, "dropbox:Backup/TIMECRATE", lambda: done.append(1))
+            yield
+            pk._confirm()
+            yield
+            check("13 backup(s)" in win._dest_dialog.get_body(),
+                  "the confirmation lost the engine's counts: %r" % win._dest_dialog.get_body())
+            win._dest_dialog.emit("response", "use")
+            yield
+            check(done == [1], "choosing a folder did not finish")
+            check(sent()[-2:] == ["remote set-path dropbox:Backup/TIMECRATE --dry-run",
+                                  "remote set-path dropbox:Backup/TIMECRATE --yes"],
+                  "set-path sequence %r" % sent())
+
+            picks, real_local, real_pick = [], tcgui.choose_local_folder, tcgui.FolderPicker
+            tcgui.choose_local_folder = lambda w, cb: picks.append(cb)
+            row_p.set_selected(2)
+            check(rp.row_connect.get_title() == "Choose a folder", "local row titled %r"
+                  % rp.row_connect.get_title())
+            sub = rp.row_connect.get_subtitle()
+            check("writable by this account" in sub and "same disk" in sub,
+                  "local help text %r" % sub)
+            rp._connect()
+            check(len(picks) == 1, "the local choice did not open a folder chooser")
+            picks[0](LOCAL)
+            yield; yield
+            check("Use %s?" % LOCAL == win._dest_dialog.get_heading(), "confirm heading %r"
+                  % win._dest_dialog.get_heading())
+            win._dest_dialog.emit("response", "use")
+            yield
+            check(sent()[-2:] == ["remote set-path %s --dry-run" % LOCAL,
+                                  "remote set-path %s --yes" % LOCAL],
+                  "local set-path sequence %r" % sent())
+            tcgui.choose_local_folder = real_local
+
+            fake = []
+            class FakePicker:
+                def __init__(self, w, start, cb, mirror=False): fake.append((start, mirror))
+                def present(self, *_): pass
+            tcgui.FolderPicker = FakePicker
+            row_p.set_selected(3)
+            rp._connect()
+            yield
+            for r in ("r:dropbox", "r:nas"):
+                check(win._remote_dialog.has_response(r), "no choice for %s" % r)
+            win._remote_dialog.emit("response", "r:nas")
+            check(fake == [("nas:", False)], "the remote choice opened %r" % fake)
+            fake.clear()
+            os.environ["TC_STUB_NOREMOTES"] = "1"
+            rp._connect()
+            yield
+            del os.environ["TC_STUB_NOREMOTES"]
+            check("rclone config" in win._remote_dialog.get_body()
+                  and win._remote_dialog.has_response("close")
+                  and not win._remote_dialog.has_response("r:nas"),
+                  "empty remote list said %r" % win._remote_dialog.get_body())
+
+            # ---- C: the second copy
+            check(rp.mirror_row.get_title() == "Second copy"
+                  and rp.mirror_row.get_subtitle() == "Off — backups go to one place",
+                  "second copy row says %r" % rp.mirror_row.get_subtitle())
+            win.status["remote2"] = "nas:Backup"
+            rp._render_mirror()
+            check(rp.mirror_row.get_subtitle() == "nas:Backup", "second copy shows %r"
+                  % rp.mirror_row.get_subtitle())
+            rp._change_mirror()
+            check(rp._mirror_dialog.get_response_enabled("off"), "cannot turn the copy off")
+            rp._mirror_dialog.emit("response", "off")
+            yield
+            check(sent()[-1] == "remote set-mirror off --yes", "turning off sent %r" % sent()[-1])
+            check(rp.mirror_row.get_subtitle() == "Off — backups go to one place",
+                  "second copy still shows %r after turning it off" % rp.mirror_row.get_subtitle())
+            rp._change_mirror()
+            check(not rp._mirror_dialog.get_response_enabled("off"),
+                  "'Turn off' offered with no second copy")
+            tcgui.choose_local_folder = lambda w, cb: picks.append(cb)
+            picks.clear()
+            rp._mirror_dialog.emit("response", "local")
+            check(len(picks) == 1, "the second copy offered no folder chooser")
+            picks[0]("/media/alice/Second")
+            yield
+            win._dest_dialog.emit("response", "use")
+            yield
+            check(sent()[-1] == "remote set-mirror /media/alice/Second --yes"
+                  and not any("set-mirror" in l and "--dry-run" in l for l in sent()),
+                  "local second copy sent %r" % sent()[-2:])
+            check(rp.mirror_row.get_subtitle() != "Off — backups go to one place",
+                  "second copy not shown after setting it")
+            tcgui.choose_local_folder = real_local
+            tcgui.choose_rclone_remote = lambda w, cb: cb("nas")
+            rp._change_mirror()
+            rp._mirror_dialog.emit("response", "rclone")
+            check(fake == [("nas:", True)], "the second copy's remote choice opened %r" % fake)
+            tcgui.FolderPicker = real_pick
+
+            # ---- B: a local destination is shown as a folder, not as an account
+            os.environ["TC_STUB_LOCAL"] = "1"
+            lp = tcgui.RemotePage(win)
+            yield; yield
+            del os.environ["TC_STUB_LOCAL"]
+            check(not lp.r_account.get_visible() and not lp.r_token.get_visible(),
+                  "a local folder still shows Account / Authorisation")
+            check(lp.r_path.get_title() == "Folder on this computer"
+                  and lp.r_path.get_subtitle() == LOCAL, "local folder row: %r" % lp.r_path.get_subtitle())
+            check(lp.p_reach.get_label() == "OK" and lp.btn_test.get_sensitive(),
+                  "reachable/test lost for a local folder")
+            check(not lp.btn_disconnect.get_sensitive(), "Forget offered for a local folder")
+            check(lp.provider_row.get_selected() == 2, "provider is %d for a local folder"
+                  % lp.provider_row.get_selected())
+            picks.clear()
+            tcgui.choose_local_folder = lambda w, cb: picks.append(cb)
+            lp._browse()
+            check(len(picks) == 1, "Browse on a local folder did not open the folder chooser")
+            finished.append(1)
+            self.quit()
+            yield
+
+        gen = script()
+
+        def step():
+            try:
+                next(gen)
+                return True
+            except StopIteration:
+                return False
+            except Exception as exc:
+                failures.append("%s: %s" % (type(exc).__name__, exc))
+                self.quit()
+                return False
+
+        GLib.timeout_add(500, step)
+
+app = Probe(application_id="dev.norvi.TimecrateFeatures")
+app.run([])
+if not finished:
+    failures.append("the script stopped before its last check")
+for f in failures:
+    print("ASSERT " + f)
+sys.exit(1 if failures else 0)
+FEATURES
+
+echo "== G8: destinations, second copy, daily time, pause, account pin =="
+: > /tmp/gs/calls.log
+if TC_STUB_LOG=/tmp/gs/calls.log xvfb-run -a --server-args="-screen 0 1100x950x24" python3 /tmp/gs/features.py > /tmp/gs/features.out 2>&1; then
+  ok "the window offers and sends what the new engine commands expect"
+else
+  grep -E '^ASSERT|Error|Traceback' /tmp/gs/features.out
+  no "destinations / second copy / schedule time / pause / pin misbehave (above)"
+fi
+
+echo "== G9: the project URL is current =="
+if grep -rq 'spencercnorton' "$REPO/gui"; then no "stale project URL in gui/"; else ok "no stale project URL in gui/"; fi
 
 echo "== G2: settings are written as a valid, re-readable shell config =="
 python3 - <<'PY' && ok "config round-trips through the shell" || no "written config is not valid shell"

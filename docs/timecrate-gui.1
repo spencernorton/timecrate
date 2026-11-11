@@ -1,4 +1,4 @@
-.TH TIMECRATE\-GUI 1 "2026-11-02" "timecrate 3.1.3" "User Commands"
+.TH TIMECRATE\-GUI 1 "2026-11-11" "timecrate 3.2.0" "User Commands"
 .SH NAME
 timecrate\-gui \- graphical front-end for Timecrate backups
 .SH SYNOPSIS
@@ -45,6 +45,35 @@ Choosing a folder does not take effect immediately: the backup count at both the
 new location is shown first, because repointing away from a folder that holds backups leaves them
 in place and invisible. Forgetting a remote deletes nothing and does not revoke access at the
 provider.
+.PP
+Besides Google Drive and Dropbox, the destination can be a
+.B Folder on this computer or an attached drive
+or
+.BR "Another rclone remote" ,
+one you already set up with
+.BR "rclone config" .
+A local folder must be writable by the account the backups run as, and one on the same disk does not
+protect against that disk failing. It is shown as a folder, with no account or sign-in, and cannot
+be forgotten; choose another destination instead.
+.PP
+.B Second copy
+sends every backup to a second place as well, chosen the same two ways, or turns that off. It
+changes nothing about the first destination.
+.SH SCHEDULE
+The
+.B Schedule
+page sets how often the backup and the recovery drill run. Besides the presets, the backup can run
+.B Daily at a time you choose
+(a 24\-hour HH:MM). Changes are applied when the settings window is closed, each with administrator
+approval, even if nothing else in it changed.
+.PP
+.B Pause scheduled backups
+skips the scheduled backups for 1, 3, 7 or 30 days; the recovery drill still runs. While a pause is
+in force the main window says so at the top, with a button to resume.
+.PP
+If the scheduled runs are not yet tied to an account, the main window says so at the top: the
+nightly run would otherwise act as root and fail to find the keys, although a backup started from
+the window still works. The button there pins the account you are using.
 .SH KEYS AND RECOVERY
 The
 .B Keys and recovery
