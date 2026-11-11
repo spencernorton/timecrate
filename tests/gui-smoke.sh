@@ -38,6 +38,16 @@ cat > /tmp/gs/bin/timecrate <<'STUB'
 [ -z "${TC_STUB_LOG:-}" ] || echo "$*" >> "$TC_STUB_LOG"
 # the engine warns on stderr, on any call (a setting it ignored, say): no view may read that as data
 echo "2026-07-29T03:00:00-06:00 [timecrate][WARN] stub: one warning on every call" >&2
+# TC_STUB_HOSTILE: the same answers with an ampersand and angle brackets in every name the window
+# shows. Rows, toasts and banners read their text as Pango markup unless told otherwise, and text
+# that does not parse is dropped: the row stays blank.
+if [ -n "${TC_STUB_HOSTILE:-}" ] && [ -z "${TC_STUB_INNER:-}" ]; then
+  TC_STUB_INNER=1 "$0" "$@" | sed -e 's#Backup/TIMECRATE#R\&D/<TIMECRATE>#g' -e 's#a@b\.c#A \& B <ab>#g' \
+    -e 's#My Backups#R\&D <new>#g' -e 's#~/Documents#~/R\&D <docs>#g' -e 's#/home/user/project-a#/home/user/a\&b#g' \
+    -e 's#"/etc/timecrate/timecrate.conf"#"/etc/time\&crate/<conf>"#g' \
+    -e 's#"reachable":true#"drive_signed_in":true,"drive_remote":"gdrive","reachable":true#'
+  exit 0
+fi
 case "$1 $2" in
   "status --json") cat <<'J'
 {"version":"3.0.0","remote":"dropbox:Backup/TIMECRATE","remote2":"","cipher":"AES-256 (AES-NI)",
@@ -69,6 +79,8 @@ J
     if [ "$3" = "--json" ]; then
       if [ -n "${TC_STUB_LOCAL:-}" ]; then
         printf '{"remote":"/media/alice/Backup/TIMECRATE","name":"","type":"local","configured":true,"has_token":false,"token_expiry":"","account":"","reachable":true,"kits":"4","last_backup":"","rclone_config":"/x/rclone.conf","remote_quota_used":"1000","remote_quota_total":"2000"}\n'
+      elif [ -n "${TC_STUB_SFTP:-}" ]; then
+        printf '{"remote":"nas:backups","name":"nas","type":"sftp","configured":true,"has_token":false,"token_expiry":"","account":"","reachable":true,"kits":"2","last_backup":"","rclone_config":"/x/rclone.conf","remote_quota_used":"","remote_quota_total":""}\n'
       elif [ -n "${TC_STUB_NOREMOTE:-}" ]; then
         printf '{"remote":"","name":"","type":"","configured":false,"has_token":false,"token_expiry":"","account":"","reachable":false,"kits":"","last_backup":"","rclone_config":"/x/rclone.conf","remote_quota_used":"","remote_quota_total":""}\n'
       else
@@ -1030,6 +1042,42 @@ class Probe(Adw.Application):
             tcgui.choose_local_folder = lambda w, cb: picks.append(cb)
             lp._browse()
             check(len(picks) == 1, "Browse on a local folder did not open the folder chooser")
+
+            # ---- a remote of another kind is "another rclone remote". It was shown as Dropbox,
+            # with a button that ran a Dropbox sign-in over it.
+            os.environ["TC_STUB_SFTP"] = "1"
+            sp = tcgui.RemotePage(win)
+            yield; yield
+            del os.environ["TC_STUB_SFTP"]
+            check(sp.provider_row.get_selected() == 3 and sp.btn_connect.get_label() == "Choose remote…",
+                  "an sftp remote is offered as provider %d, button %r"
+                  % (sp.provider_row.get_selected(), sp.btn_connect.get_label()))
+            calls, real_async = [], tcgui.run_async
+            tcgui.run_async = lambda argv, cb: calls.append((argv, cb))
+            fake.clear()
+            tcgui.FolderPicker = FakePicker
+            sp.provider_row.set_selected(1)
+            check(sp.btn_connect.get_label() == "Connect…", "Dropbox beside an sftp remote offers %r"
+                  % sp.btn_connect.get_label())
+            sp._connect()
+            tcgui.run_async = real_async
+            # --reauthorize is safe to send: the engine keeps it from reaching a remote of another kind
+            check(len(calls) == 1 and calls[0][0][1:] == ["remote", "connect", "--reauthorize"],
+                  "Dropbox beside an sftp remote ran %r" % [c[0] for c in calls])
+            # signed in under the provider's own name: which folder is the next decision
+            calls[0][1](True, "connected as rclone remote 'dropbox'.")
+            check(fake == [("dropbox:", False)], "after that sign-in the folder choice opened %r" % fake)
+            # the same for the Drive sign-in's name with no sign-in behind it; a name that is
+            # simply not set up yet is signed in where it is, so there is no folder to ask for
+            for name, opened in (("gdrive", [("dropbox:", False)]), ("mybox", [])):
+                sp.info = dict(sp.info, name=name, type="", configured=False, drive_remote="gdrive")
+                calls.clear(); fake.clear()
+                tcgui.run_async = lambda argv, cb: calls.append((argv, cb))
+                sp._connect()
+                tcgui.run_async = real_async
+                calls[0][1](True, "connected.")
+                check(fake == opened, "a sign-in beside the unset remote %r opened %r" % (name, fake))
+            tcgui.FolderPicker = real_pick
             finished.append(1)
             self.quit()
             yield
@@ -1089,6 +1137,108 @@ body = open(p).read()
 assert body.count("TIMECRATE_KEEP=") == 1, body
 assert "TIMECRATE_REMOTE=" in body, "second write dropped an unrelated setting"
 PY
+
+echo "== G8: no text in the window is read as markup =="
+# Found on a real machine: the Remote page's Google Drive row was blank, because its text ends in
+# "gdrive:<folder>" and GTK refused it as markup. The same went for a folder called "R&D" in the
+# folder picker, a path with an ampersand in the include list, and any engine message that names
+# <remote>:<path>. The stub answers with such names everywhere; GTK must reject nothing.
+cat > /tmp/gs/markup.py <<'PY'
+import importlib.util, importlib.machinery, os, sys, tempfile
+import gi
+gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw, GLib
+
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+spec = importlib.util.spec_from_loader(
+    "tcgui", importlib.machinery.SourceFileLoader("tcgui", os.environ["GUI"]))
+tcgui = importlib.util.module_from_spec(spec); spec.loader.exec_module(tcgui)
+failures, finished = [], []
+
+class Probe(Adw.Application):
+    def do_activate(self):
+        win = tcgui.Window(self)
+        win.present()
+
+        def script():
+            while not (win.status and win.kit_names):
+                yield
+            if "R&D/<TIMECRATE>" not in (win.status.get("remote") or ""):
+                failures.append("the stub is not in hostile mode: %r" % win.status.get("remote"))
+            dlg = tcgui.SettingsDialog(win, win.status)
+            dlg.present(win)
+            while not dlg.remote_page.info:
+                yield
+            dlg.set_visible_page(dlg.remote_page)
+            for _ in range(4):
+                yield
+            page = dlg.remote_page
+            if "gdrive:<folder>" not in page.r_drive.get_subtitle():
+                failures.append("the Google Drive row lost its text: %r" % page.r_drive.get_subtitle())
+            if page.r_account.get_subtitle() != "A & B <ab>":
+                failures.append("the account row shows %r" % page.r_account.get_subtitle())
+            picker = tcgui.FolderPicker(win, "dropbox:", lambda *_: None)
+            picker.present(win)
+            for _ in range(6):
+                yield
+            if "R&D <new>" not in [r.get_title() for r in picker.rows()]:
+                failures.append("the folder picker lost a folder: %r" % [r.get_title() for r in picker.rows()])
+            picker._enter("R&D <new>")          # its path becomes the group's title
+            for _ in range(6):
+                yield
+            picker.close()
+            editor = tcgui.PathsEditor(win, "include", lambda *_: None)
+            editor.present(win)
+            for _ in range(6):
+                yield
+            editor.close()
+            win.toast("Backups now go to dropbox:R&D/<TIMECRATE>")
+            win._set_banner("backup failed: 'x' is not a remote path — it needs the form <remote>:<path> & more")
+            win._on_kits(False, "it needs the form <remote>:<path>, e.g. dropbox:R&D\n")
+            real_async = tcgui.run_async          # the coverage report, failing with such a path
+            tcgui.run_async = lambda argv, cb, **kw: cb(False, "cannot read /home/user/a&b <x>")
+            cov = tcgui.CoverageDialog(win)
+            tcgui.run_async = real_async
+            cov.present(win)
+            for _ in range(6):
+                yield
+            finished.append(True)
+
+        steps = script()
+        def step():
+            try:
+                next(steps)
+                return True
+            except StopIteration:
+                self.quit()
+                return False
+        GLib.timeout_add(250, step)
+        GLib.timeout_add(60000, lambda: (failures.append("timed out"), self.quit())[1])
+
+Probe(application_id="dev.norvi.TimecrateMarkup").run([])
+if not finished:
+    failures.append("the script did not reach its end")
+for f in failures:
+    print("ASSERT " + f)
+sys.exit(1 if failures else 0)
+PY
+# The widgets keep the text they were given whether or not it could be drawn, so the script's own
+# checks cannot see a blank row. GTK says so on stderr, and that is what is read here.
+rejected(){ grep -h 'from markup due to error' "$@" 2>/dev/null | sed -E 's/.*Failed to set text/   /' | cut -c1-150 | sort -u; }
+if TC_STUB_HOSTILE=1 xvfb-run -a --server-args="-screen 0 1100x950x24" python3 /tmp/gs/markup.py > /tmp/gs/markup.out 2>&1 \
+   && [ -z "$(rejected /tmp/gs/markup.out)" ]; then
+  ok "names with an ampersand or angle brackets are shown as they are"
+else
+  no "the window lost text that has an ampersand or angle brackets in it:"
+  { grep ASSERT /tmp/gs/markup.out; rejected /tmp/gs/markup.out; } | head -8 | sed 's/^/    /'
+fi
+# ...and that goes for every scenario above, whatever it happened to show
+if [ -z "$(rejected /tmp/gs/*.out /tmp/gs/out /tmp/gs/fr)" ]; then ok "GTK rejected no text as markup in any scenario"
+else no "GTK rejected a text as markup in an earlier scenario: $(rejected /tmp/gs/*.out /tmp/gs/out /tmp/gs/fr | head -3)"; fi
+# a row made straight from libadwaita reads the next name with an ampersand in it as markup
+if grep -qE 'Adw\.(Action|Combo|Entry|Expander)Row\(' "$GUI"; then
+  no "a row is made straight from libadwaita, not from the window's plain rows: $(grep -nE 'Adw\.(Action|Combo|Entry|Expander)Row\(' "$GUI" | head -3 | cut -c1-80)"
+else ok "every row is one of the window's plain rows"; fi
 
 echo "==== GUI RESULT: $PASS PASS / $FAIL FAIL ===="
 [ "$FAIL" -eq 0 ]

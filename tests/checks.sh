@@ -3030,9 +3030,10 @@ cfg=""; prev=""
 for a in "$@"; do [ "$prev" = "--config" ] && cfg="$a"; prev="$a"; done
 case "$*" in
   *"config dump"*)
-    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
-      case "$cfg" in *drive65*) echo '{"gdrive":{"type":"drive","token":"x"}}';; *) echo '{}';; esac
-    else echo '{}'; fi;;
+    case "$cfg" in
+      *drive65*) if [ -f "$cfg" ]; then echo '{"gdrive":{"type":"drive","token":"x"}}'; else echo '{}'; fi;;
+      *) cat /tmp/tm/main65.dump 2>/dev/null || echo '{}';;
+    esac;;
   *"config create"*) [ -n "$cfg" ] && { mkdir -p "$(dirname "$cfg")"; echo '[gdrive]' > "$cfg"; }; echo created;;
 esac
 exit 0
@@ -3055,6 +3056,58 @@ PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_REMOTE=gdrive:Backups TIMECRATE_DRIVE_CON
 grep -q 'backend      drive (rclone remote "gdrive")' /tmp/t65st.out \
   && ok "remote status names the Drive backend from its own config" \
   || no "remote status misreports the Drive backend: $(grep 'backend' /tmp/t65st.out)"
+# ...and the form the window reads: it said "not configured, not signed in" for the same remote
+PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_REMOTE=gdrive:Backups TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf \
+  "$TC" remote status --json 2>/dev/null | python3 -c 'import json,sys
+d=json.load(sys.stdin); sys.exit(0 if d["type"]=="drive" and d["configured"] and d["has_token"] else 1)' \
+  && ok "remote status --json reads a Drive destination from the Drive config" \
+  || no "remote status --json says a signed-in Drive destination is not configured"
+# A sign-in never replaces a remote of another kind. `config create` swaps a remote whole, and the
+# window sent --reauthorize for whatever remote was in use.
+t65e=(PATH="/tmp/tm/fakebin:$PATH" TIMECRATE_DRIVE_CONF=/tmp/tm/drive65.conf TIMECRATE_RCLONE_CONF=/tmp/tm/main65.conf)
+: > /tmp/tm/rclone65.log
+env "${t65e[@]}" TIMECRATE_REMOTE=gdrive:Backups "$TC" remote connect --reauthorize >/tmp/t65e.out 2>&1 || true
+if grep -q -- '--config /tmp/tm/main65.conf config create dropbox dropbox' /tmp/tm/rclone65.log \
+   && ! grep -q 'config create gdrive' /tmp/tm/rclone65.log; then
+  ok "a Dropbox sign-in beside a Drive destination gets a remote of its own"
+else no "a Dropbox sign-in beside a Drive destination ran: $(grep 'config create' /tmp/tm/rclone65.log | head -2)"; fi
+echo '{"s3x":{"type":"s3"}}' > /tmp/tm/main65.dump; : > /tmp/tm/rclone65.log
+env "${t65e[@]}" TIMECRATE_REMOTE=s3x:bucket "$TC" remote connect --reauthorize >/tmp/t65f.out 2>&1 || true
+if grep -q 'config create dropbox dropbox' /tmp/tm/rclone65.log && ! grep -q 'config create s3x' /tmp/tm/rclone65.log; then
+  ok "...and beside a destination of any other kind, which is left as it is"
+else no "a Dropbox sign-in replaced the remote in use: $(grep 'config create' /tmp/tm/rclone65.log | head -2)"; fi
+echo '{"s3x":{"type":"s3"},"dropbox":{"type":"s3"}}' > /tmp/tm/main65.dump; : > /tmp/tm/rclone65.log
+if env "${t65e[@]}" TIMECRATE_REMOTE=s3x:bucket "$TC" remote connect --reauthorize >/tmp/t65g.out 2>&1; then
+  no "connect replaced a remote of another kind that has the provider's name"
+elif grep -q 'would replace it' /tmp/t65g.out && ! grep -q 'config create' /tmp/tm/rclone65.log; then
+  ok "a remote of another kind under the provider's own name is refused, --reauthorize or not"
+else no "wrong refusal: $(tail -1 /tmp/t65g.out)"; fi
+echo '{"mydb":{"type":"dropbox","token":"x"}}' > /tmp/tm/main65.dump; : > /tmp/tm/rclone65.log
+if env "${t65e[@]}" TIMECRATE_REMOTE=mydb:TC "$TC" remote connect >/tmp/t65h.out 2>&1; then
+  no "connect replaced an existing remote without --reauthorize"
+elif grep -q 'already exists' /tmp/t65h.out && ! grep -q 'config create' /tmp/tm/rclone65.log; then
+  ok "a remote of the same kind still needs --reauthorize"
+else no "wrong refusal: $(tail -1 /tmp/t65h.out)"; fi
+env "${t65e[@]}" TIMECRATE_REMOTE=mydb:TC "$TC" remote connect --reauthorize >/tmp/t65i.out 2>&1 || true
+grep -q 'config create mydb dropbox' /tmp/tm/rclone65.log \
+  && ok "--reauthorize signs in again under the remote in use" \
+  || no "--reauthorize went elsewhere: $(grep 'config create' /tmp/tm/rclone65.log | head -1)"
+# The Drive sign-in's name with no sign-in behind it, and a remote of that name in the main config
+# from before the sign-in had its own: a plain `connect` made that one a Dropbox remote.
+echo '{"gdrive":{"type":"drive","token":"x"}}' > /tmp/tm/main65.dump; : > /tmp/tm/rclone65.log
+env "${t65e[@]}" TIMECRATE_DRIVE_CONF=/tmp/tm/absent-drive65.conf TIMECRATE_REMOTE=gdrive:Backups \
+  "$TC" remote connect >/tmp/t65k.out 2>&1 || true
+if grep -q 'config create dropbox dropbox' /tmp/tm/rclone65.log && ! grep -q 'config create gdrive' /tmp/tm/rclone65.log; then
+  ok "the Drive sign-in's name is never given to another provider, signed in or not"
+else no "a Dropbox sign-in took the Drive sign-in's name: $(grep 'config create' /tmp/tm/rclone65.log | head -2)"; fi
+rm -f /tmp/tm/main65.dump
+# the Drive remote is removed from the config it is in
+: > /tmp/tm/rclone65.log
+env "${t65e[@]}" TIMECRATE_REMOTE=gdrive:Backups TIMECRATE_USER_CONF=/tmp/tm/user65.conf \
+  "$TC" remote disconnect --yes --remove-rclone-remote >/tmp/t65j.out 2>&1 || true
+grep -q -- '--config /tmp/tm/drive65.conf config delete gdrive' /tmp/tm/rclone65.log \
+  && ok "disconnect --remove-rclone-remote removes the Drive remote from the Drive config" \
+  || no "the Drive remote was deleted from: $(grep 'config delete' /tmp/tm/rclone65.log | head -1)"
 rm -rf /tmp/tm/fakebin /tmp/tm/staging-pq /tmp/tm/staging-classic
 
 echo "== T66: the wrappers read the config files without turning them into the caller's override =="
