@@ -4,6 +4,15 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.2.3 — 2026-11-11
+
+- **`timecrate coverage` classifies the top of the filesystem.** Under the root `/`, which is one
+  of the default roots, and under any `--root` given with a trailing slash, every entry was
+  reported `UNLISTED`, whatever the include and exclude lists said: `/etc` read as in no kit on a
+  machine that backs it up. The window's Coverage dialog showed the same rows under "Not backed
+  up", as `//etc`. Only the report was wrong; the kits were built from the lists as before. Roots
+  such as a home directory were classified correctly.
+
 ## 3.2.2 — 2026-11-11
 
 - **A check for deleted kits that could not list the destination is no longer skipped.** Since
