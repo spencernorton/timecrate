@@ -1,3 +1,11 @@
+timecrate (3.2.3) resolute; urgency=medium
+
+  * coverage: the root / and a root given with a trailing slash are
+    classified against the include and exclude lists. Every entry under
+    them was reported UNLISTED, /etc included. The kits were not affected.
+
+ -- Norvi <apt@globalentry.systems>  Wed, 11 Nov 2026 13:05:00 +0000
+
 timecrate (3.2.2) resolute; urgency=medium
 
   * A check for deleted kits that could not list the destination is made

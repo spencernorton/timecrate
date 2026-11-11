@@ -2447,6 +2447,18 @@ printf '%s\n' "${t54#/}/root/nobody" >> "$t54/inc"
 [ "$(state nobody)" = included ] \
   && ok "and the classification tracks the list rather than being hardcoded (proven)" \
   || no "T54 is vacuous: the state did not change after the path was included"
+# The root "/" and a root given with a trailing slash made every entry "//name", which matched
+# no list entry: the whole top level, /etc included, read UNLISTED (3.2.3).
+printf '%s\n' etc >> "$t54/inc"
+slashed(){ env TIMECRATE_INCLUDE="$t54/inc" TIMECRATE_EXCLUDE="$t54/exc" TIMECRATE_USER="$(id -un)" \
+             "$TCBIN" coverage --root "$1" --no-size 2>/dev/null | awk -v p="$2" '$3==p{print $1}'; }
+[ "$(slashed / etc)" = included ] && [ "$(slashed / usr)" = UNLISTED ] \
+  && ok "and under the root / a listed path reports included, an unlisted one UNLISTED" \
+  || no "the root / is misclassified (etc: '$(slashed / etc)', usr: '$(slashed / usr)')"
+[ "$(slashed "$t54/root/" "${t54#/}/root/kept")" = included ] \
+  && [ "$(slashed "$t54/root/" "${t54#/}/root/etc")" = UNLISTED ] \
+  && ok "and the same under a root given with a trailing slash" \
+  || no "a root with a trailing slash is misclassified (kept: '$(slashed "$t54/root/" "${t54#/}/root/kept")', etc: '$(slashed "$t54/root/" "${t54#/}/root/etc")')"
 rm -rf "$t54"
 
 echo "== T56: a VM that never existed raises no key-exposure alarm (v2.14.1) =="

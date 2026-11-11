@@ -11,7 +11,7 @@
 # Break-glass needs only gpg + zstd + tar (see docs/BREAK-GLASS.md).
 set -euo pipefail
 
-VERSION="3.2.2"
+VERSION="3.2.3"
 SELF="$(basename "$0")"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
@@ -2759,6 +2759,8 @@ cmd_coverage(){
   local rows="" root entry rel st rule kb
   for root in $roots; do
     [ -d "$root" ] || continue
+    # No trailing slash: "/" and "dir/" made every entry "//name", which matches no list entry.
+    root="${root%"${root##*[!/]}"}"
     for entry in "$root"/* "$root"/.[!.]*; do
       [ -e "$entry" ] || continue
       rel="${entry#/}"
