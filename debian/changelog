@@ -1,3 +1,16 @@
+timecrate (3.2.1) resolute; urgency=medium
+
+  * The window's Remote page reads a Google Drive destination from the Drive
+    sign-in's own rclone config: it said "not signed in" for a remote that
+    was signed in and reachable.
+  * Rows, toasts and banners show their text as it is. A name with an
+    ampersand or angle brackets was read as markup and left the row blank.
+  * A sign-in to Dropbox never replaces an rclone remote of another kind:
+    it gets a remote of its own, and the window shows such a destination
+    as "Another rclone remote" where it said "Dropbox".
+
+ -- Norvi <apt@globalentry.systems>  Wed, 11 Nov 2026 07:30:00 +0000
+
 timecrate (3.2.0) resolute; urgency=high
 
   * Security: root no longer acts on files in the configured account's home.

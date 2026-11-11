@@ -27,6 +27,38 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 TC = shutil.which("timecrate") or "/usr/bin/timecrate"
 APP_ID = "dev.norvi.Timecrate"
 
+
+class _Plain:
+    """A row whose text is shown as it is.
+
+    That text is data -- a path, a remote, the engine's own words -- and libadwaita reads it as
+    Pango markup unless told otherwise. Text that does not parse is dropped: a folder called "R&D",
+    or a hint with <folder> in it, left its row blank. Markup goes off before any text is set; as
+    constructor arguments the two are not applied in an order this code controls.
+    """
+
+    def __init__(self, **props):
+        super().__init__()
+        self.set_use_markup(False)
+        for name, value in props.items():
+            self.set_property(name.replace("_", "-"), value)
+
+
+class ActionRow(_Plain, Adw.ActionRow):
+    pass
+
+
+class ComboRow(_Plain, Adw.ComboRow):
+    pass
+
+
+class EntryRow(_Plain, Adw.EntryRow):
+    pass
+
+
+class ExpanderRow(_Plain, Adw.ExpanderRow):
+    pass
+
 # Kits written before 3.0.0 carry the previous name; they are the same series.
 KIT_RE = re.compile(r"(?:timecrate|timemachine)-(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.tar\.zst\.gpg$")
 # `restore` ends with: inspect <dir>/extracted ; RESTORE.md in /usr/share/doc/timecrate ...
@@ -245,7 +277,7 @@ def run_async(argv, on_done, parsed=False):
     proc.communicate_utf8_async(None, None, finished)
 
 
-class KitRow(Adw.ActionRow):
+class KitRow(ActionRow):
     def __init__(self, filename, display, on_restore, size="", deviation=None):
         if size not in ("", None):
             display = "%s  —  %s" % (display, human_bytes(size))
@@ -302,7 +334,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         # appeared to work and then silently undid itself.
         dest = Adw.PreferencesGroup(title="Destination")
         page.add(dest)
-        where = Adw.ActionRow(title="Where backups go",
+        where = ActionRow(title="Where backups go",
                               subtitle=status.get("remote", "") or "not set")
         where.set_subtitle_selectable(True)
         go = Gtk.Button(label="Remote page", valign=Gtk.Align.CENTER)
@@ -310,7 +342,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         where.add_suffix(go)
         dest.add(where)
         if status.get("remote2"):
-            mirror = Adw.ActionRow(title="Second remote", subtitle=status.get("remote2", ""))
+            mirror = ActionRow(title="Second remote", subtitle=status.get("remote2", ""))
             mirror.set_subtitle_selectable(True)
             dest.add(mirror)
 
@@ -346,7 +378,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         # privileged binary as everything else.
         for label, which, key in (("Included paths", "include", "include_file"),
                                   ("Excluded paths", "exclude", "exclude_file")):
-            row = Adw.ActionRow(title=label, subtitle=status.get(key) or "")
+            row = ActionRow(title=label, subtitle=status.get(key) or "")
             row.set_subtitle_selectable(True)
             btn = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER)
             btn.connect("clicked", lambda _b, w=which: PathsEditor(
@@ -356,7 +388,7 @@ class SettingsDialog(Adw.PreferencesDialog):
 
         # The lists say what was asked for; this says what that actually means on THIS disk —
         # including the paths neither list mentions, which are the ones that go missing quietly.
-        cov = Adw.ActionRow(title="Coverage",
+        cov = ActionRow(title="Coverage",
                             subtitle="What is backed up, what is pruned, and what nothing covers")
         cov_btn = Gtk.Button(label="Show…", valign=Gtk.Align.CENTER)
         cov_btn.connect("clicked", lambda *_: CoverageDialog(window).present(window))
@@ -396,7 +428,7 @@ class SettingsDialog(Adw.PreferencesDialog):
              "been restored is a hypothesis.",
              [("monthly", "Monthly"), ("weekly", "Weekly"), ("daily", "Daily")]),
         ):
-            row = Adw.ComboRow(title=title, subtitle=subtitle)
+            row = ComboRow(title=title, subtitle=subtitle)
             model = Gtk.StringList()
             model.append("Off")
             for _value, label in choices:
@@ -406,13 +438,13 @@ class SettingsDialog(Adw.PreferencesDialog):
             group.add(row)
             self.schedule_rows[unit] = (row, choices)
             if unit == "backup":
-                self.time_row = Adw.EntryRow(title="Time of day (HH:MM, 24-hour)")
+                self.time_row = EntryRow(title="Time of day (HH:MM, 24-hour)")
                 self.time_row.set_text("03:00")
                 self.time_row.set_visible(False)
                 group.add(self.time_row)
                 row.connect("notify::selected", lambda *_: self._sync_time_row())
 
-        self.schedule_note = Adw.ActionRow(title="Reading the current schedule…", subtitle="")
+        self.schedule_note = ActionRow(title="Reading the current schedule…", subtitle="")
         self.schedule_note.set_subtitle_selectable(True)
         group.add(self.schedule_note)
         self._load_schedule()
@@ -423,7 +455,7 @@ class SettingsDialog(Adw.PreferencesDialog):
                         "runs. Applied when you close this window, with administrator approval.")
         sched.add(pause)
         paused = status.get("paused_until") or ""
-        self.pause_row = Adw.ComboRow(
+        self.pause_row = ComboRow(
             title="Pause scheduled backups",
             subtitle="Paused until %s" % paused[:19].replace("T", " ") if paused
             else "Not paused")
@@ -443,7 +475,7 @@ class SettingsDialog(Adw.PreferencesDialog):
             description="A failed backup or drill sends a message. An alert path that is only "
                         "ever exercised by a real failure is one nobody knows is broken.")
         sched.add(alerts)
-        self.alert_row = Adw.ActionRow(title="Failure alerts", subtitle="…")
+        self.alert_row = ActionRow(title="Failure alerts", subtitle="…")
         self.alert_row.set_subtitle_selectable(True)
         test = Gtk.Button(label="Send a test", valign=Gtk.Align.CENTER)
         test.connect("clicked", lambda *_: self._test_alert())
@@ -454,13 +486,13 @@ class SettingsDialog(Adw.PreferencesDialog):
         about = Adw.PreferencesGroup(title="Configuration files")
         sched.add(about)
         sources = status.get("conf_sources") or []
-        row = Adw.ActionRow(
+        row = ActionRow(
             title="In effect",
             subtitle="\n".join(sources) if sources
             else "None — the tool is running entirely on its built-in defaults.")
         row.set_subtitle_selectable(True)
         about.add(row)
-        written = Adw.ActionRow(
+        written = ActionRow(
             title="Changes here are written to",
             subtitle="%s\nIt overrides the system file. `timecrate config` shows what wins."
                      % user_config_path())
@@ -510,7 +542,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         dialog.present(self)
 
     def _entry(self, group, title, value, tooltip):
-        row = Adw.EntryRow(title=title)
+        row = EntryRow(title=title)
         row.set_text(str(value or ""))
         if tooltip:
             row.set_tooltip_text(tooltip)
@@ -682,14 +714,14 @@ class ImportKeyDialog(Adw.Dialog):
                         "printed recovery sheet. It starts with BEGIN PGP PRIVATE KEY BLOCK.")
         page.add(group)
 
-        self.file_row = Adw.ActionRow(title="Key file", subtitle="none chosen")
+        self.file_row = ActionRow(title="Key file", subtitle="none chosen")
         self.file_row.set_subtitle_selectable(True)
         pick = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER)
         pick.connect("clicked", lambda *_: self._choose("key"))
         self.file_row.add_suffix(pick)
         group.add(self.file_row)
 
-        self.sign_row = Adw.ActionRow(
+        self.sign_row = ActionRow(
             title="Signing public key",
             subtitle="optional — without it a restore can decrypt but not authenticate")
         self.sign_row.set_subtitle_selectable(True)
@@ -983,7 +1015,7 @@ class FolderPicker(Adw.Dialog):
         self._load()
 
     def _load(self):
-        self.group.set_title(self.path or "(no remote)")
+        self.group.set_title(GLib.markup_escape_text(self.path or "(no remote)"))
         for row in list(self.rows()):
             self.group.remove(row)
         self.up_button.set_sensitive(":" in self.path and self.path.split(":", 1)[1].strip("/") != "")
@@ -995,7 +1027,7 @@ class FolderPicker(Adw.Dialog):
             if seq != self._seq:
                 return                      # a later navigation already superseded this one
             if not ok:
-                row = Adw.ActionRow(title="Could not list this folder",
+                row = ActionRow(title="Could not list this folder",
                                     subtitle=self.window._clean(out.strip().splitlines()[-1])
                                     if out.strip() else "")
                 self.group.add(row)
@@ -1005,11 +1037,11 @@ class FolderPicker(Adw.Dialog):
             except ValueError:
                 names = []
             if not names:
-                self.group.add(Adw.ActionRow(title="No folders here",
+                self.group.add(ActionRow(title="No folders here",
                                              subtitle="You can still choose this one."))
                 return
             for name in names:
-                row = Adw.ActionRow(title=name, activatable=True)
+                row = ActionRow(title=name, activatable=True)
                 row.add_prefix(Gtk.Image.new_from_icon_name("folder-symbolic"))
                 row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
                 row.connect("activated", lambda _r, n=name: self._enter(n))
@@ -1116,20 +1148,21 @@ class CoverageDialog(Adw.Dialog):
             for g in list(self._groups()):
                 self.page.remove(g)
             if not ok:
-                self.page.add(Adw.PreferencesGroup(
-                    description="Could not read coverage: " + (out or "no output").strip()[:400]))
+                self.page.add(Adw.PreferencesGroup(description=GLib.markup_escape_text(
+                    "Could not read coverage: " + (out or "no output").strip()[:400])))
                 return
             try:
                 data = json.loads(out)
             except Exception as exc:
-                self.page.add(Adw.PreferencesGroup(description="Unreadable coverage output: %s" % exc))
+                self.page.add(Adw.PreferencesGroup(
+                    description=GLib.markup_escape_text("Unreadable coverage output: %s" % exc)))
                 return
             entries = data.get("entries", [])
             over = data.get("unlisted_over_warn", [])
             warn_mb = data.get("warn_mb", 100)
             if over:
                 head = Adw.PreferencesGroup()
-                row = Adw.ActionRow(
+                row = ActionRow(
                     title="%d %s over %sMB are in no kit"
                           % (len(over), "directory is" if len(over) == 1 else "directories are", warn_mb),
                     subtitle="Largest: " + ", ".join(
@@ -1147,14 +1180,14 @@ class CoverageDialog(Adw.Dialog):
                 # Capped deliberately, and the cap is stated rather than silently truncating —
                 # a list that quietly stops is how you conclude there is nothing more to see.
                 for e in rows[:60]:
-                    r = Adw.ActionRow(title="/" + e["path"],
+                    r = ActionRow(title="/" + e["path"],
                                       subtitle=(e["rule"] if e["rule"] and e["rule"] != "-" else ""))
                     r.set_subtitle_selectable(True)
                     r.add_suffix(Gtk.Label(label=human_bytes(e["kb"] * 1024) if e["kb"] else "",
                                            valign=Gtk.Align.CENTER))
                     group.add(r)
                 if len(rows) > 60:
-                    group.add(Adw.ActionRow(title="… and %d more not shown" % (len(rows) - 60)))
+                    group.add(ActionRow(title="… and %d more not shown" % (len(rows) - 60)))
                 self.page.add(group)
 
         run_async([TC, "coverage", "--json"], done, parsed=True)
@@ -1201,7 +1234,7 @@ class PathsEditor(Adw.Dialog):
 
         add = Adw.PreferencesGroup(title="Add a path")
         page.add(add)
-        self.entry = Adw.EntryRow(title="Path")
+        self.entry = EntryRow(title="Path")
         pick = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER)
         pick.set_tooltip_text("Choose a folder")
         pick.connect("clicked", lambda *_: self._choose())
@@ -1239,14 +1272,14 @@ class PathsEditor(Adw.Dialog):
 
         def done(ok, out):
             if not ok:
-                self.group.add(Adw.ActionRow(
+                self.group.add(ActionRow(
                     title="Could not read the list",
                     subtitle=self.window._clean(out.strip().splitlines()[-1]) if out.strip() else ""))
                 return
             entries = [l.strip() for l in out.splitlines() if l.strip()]
             self.group.set_title("%d entr%s" % (len(entries), "y" if len(entries) == 1 else "ies"))
             for entry in entries:
-                row = Adw.ActionRow(title=entry)
+                row = ActionRow(title=entry)
                 row.set_title_selectable(True)
                 remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
                 remove.add_css_class("flat")
@@ -1321,7 +1354,7 @@ class RemotePage(Adw.PreferencesPage):
         self.r_token = self._row(conn, "Authorisation", "dialog-password-symbolic")
         self.r_reach, self.p_reach = self._pill(conn, "Reachable", "network-transmit-receive-symbolic")
         self.r_quota = self._row(conn, "Space", "drive-harddisk-symbolic")
-        self.provider_row = Adw.ComboRow(
+        self.provider_row = ComboRow(
             title="Provider",
             subtitle="Google Drive signs in with its own account, in its own rclone config")
         provider_model = Gtk.StringList()
@@ -1340,7 +1373,7 @@ class RemotePage(Adw.PreferencesPage):
             description="Every backup is also copied to a second place, so losing one place does "
                         "not lose them. The second copy is only as safe as where it is.")
         self.add(mirror)
-        self.mirror_row = Adw.ActionRow(title="Second copy", subtitle="…")
+        self.mirror_row = ActionRow(title="Second copy", subtitle="…")
         self.mirror_row.set_subtitle_selectable(True)
         change = Gtk.Button(label="Change…", valign=Gtk.Align.CENTER)
         change.connect("clicked", lambda *_: self._change_mirror())
@@ -1366,7 +1399,7 @@ class RemotePage(Adw.PreferencesPage):
         self.reload()
 
     def _row(self, group, title, icon):
-        row = Adw.ActionRow(title=title, subtitle="…")
+        row = ActionRow(title=title, subtitle="…")
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         row.set_subtitle_selectable(True)
         group.add(row)
@@ -1380,7 +1413,7 @@ class RemotePage(Adw.PreferencesPage):
         return row, pill
 
     def _action(self, group, title, subtitle, label, fn):
-        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row = ActionRow(title=title, subtitle=subtitle)
         b = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
         b.connect("clicked", lambda *_: fn())
         row.add_suffix(b)
@@ -1447,9 +1480,12 @@ class RemotePage(Adw.PreferencesPage):
         self._render_mirror()
         # the provider choice starts from the remote this machine actually uses, so the
         # Connect button keeps describing THAT sign-in until the user picks another
+        # A remote that is neither is "another rclone remote". Shown as Dropbox, its button
+        # offered to re-authorise it -- with a Dropbox sign-in that would have replaced it.
         rtype = (d.get("type") or "").lower()
         self.provider_row.set_selected(
-            2 if local else 0 if rtype == "drive" or not d.get("configured") else 1)
+            2 if local else 1 if rtype == "dropbox"
+            else 0 if rtype == "drive" or not d.get("configured") else 3)
         self._provider_changed()
 
     # ---------- actions ----------
@@ -1535,8 +1571,10 @@ class RemotePage(Adw.PreferencesPage):
                 "Re-authorise Google…" if self.info.get("drive_signed_in")
                 else "Sign in with Google…")
         else:                                          # Dropbox (the historical default)
-            self.btn_connect.set_label(
-                "Re-authorise…" if self.info.get("configured") else "Connect…")
+            self.btn_connect.set_label("Re-authorise…" if self._on_dropbox() else "Connect…")
+
+    def _on_dropbox(self):
+        return (self.info.get("type") or "").lower() == "dropbox"
 
     def _connect(self):
         kind = self.provider_row.get_selected()
@@ -1546,8 +1584,17 @@ class RemotePage(Adw.PreferencesPage):
         drive = kind == 0
         argv = ([TC, "remote", "connect", "--provider", "drive"] if drive
                 else [TC, "remote", "connect"])
-        if (drive and self.info.get("drive_configured")) or (not drive and self.info.get("configured")):
+        # Signing in again is what the button is for, also when a Dropbox remote is already there
+        # beside the one in use. The engine never lets a sign-in replace a remote of another kind.
+        if not drive or self.info.get("drive_configured"):
             argv.append("--reauthorize")
+        # The engine signs in under the name in use when that remote is this provider's, or is not
+        # set up yet and is not the Drive sign-in's name. Otherwise under the provider's own name,
+        # and then the folder is still to pick.
+        name = self.info.get("name")
+        in_place = self._on_dropbox() or (name and not self.info.get("configured")
+                                          and name != (self.info.get("drive_remote") or "gdrive"))
+        pick = "" if drive or in_place else "dropbox:"
         self.btn_connect.set_sensitive(False)
         self.window.log_line("$ " + " ".join(argv[1:]))
         self.window.toast("Finish the sign-in in your browser")
@@ -1560,10 +1607,10 @@ class RemotePage(Adw.PreferencesPage):
             if ok:
                 self.window.toast("Connected")
                 self._after_change()
-                if drive:
+                if drive or pick:
                     # Signed in: the next decision is which folder, so open the picker there.
                     FolderPicker(self.window,
-                                 "%s:" % (self.info.get("drive_remote") or "gdrive"),
+                                 pick or "%s:" % (self.info.get("drive_remote") or "gdrive"),
                                  self._after_change).present(self.window)
             else:
                 self.window.report(msg or "Could not connect.")
@@ -1645,7 +1692,7 @@ class KeysPage(Adw.PreferencesPage):
                         "and both are on the recovery sheet. Backups already made stay readable "
                         "either way.")
         self.add(crypto)
-        self.crypto_row = Adw.ComboRow(
+        self.crypto_row = ComboRow(
             title="Encryption algorithm",
             subtitle="Applies to new backups; change it any time")
         crypto_model = Gtk.StringList()
@@ -1694,7 +1741,7 @@ class KeysPage(Adw.PreferencesPage):
         # `harden` is reported here, deliberately not offered. It is the one irreversible act in
         # the tool, and its safety check is an interactive off-box comparison that a subprocess
         # with no terminal cannot carry out, so a button could only skip that check.
-        self.hint = Adw.ActionRow(title="", subtitle="")
+        self.hint = ActionRow(title="", subtitle="")
         self.hint.set_subtitle_selectable(True)
         self.hint.set_visible(False)
         act.add(self.hint)
@@ -1704,7 +1751,7 @@ class KeysPage(Adw.PreferencesPage):
     # ---------- construction helpers ----------
 
     def _row(self, group, title, icon):
-        row = Adw.ActionRow(title=title, subtitle="…")
+        row = ActionRow(title=title, subtitle="…")
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         row.set_subtitle_selectable(True)
         group.add(row)
@@ -1719,7 +1766,7 @@ class KeysPage(Adw.PreferencesPage):
         return row, pill
 
     def _action(self, group, title, subtitle, label, fn):
-        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row = ActionRow(title=title, subtitle=subtitle)
         button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
         button.connect("clicked", lambda *_: fn())
         row.add_suffix(button)
@@ -2002,7 +2049,7 @@ class Window(Adw.ApplicationWindow):
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         # Persistent state, kept apart from `banner`, which every run and every error overwrites.
-        self.pause_banner = Adw.Banner(button_label="Resume")
+        self.pause_banner = Adw.Banner(use_markup=False, button_label="Resume")
         self.pause_banner.connect("button-clicked",
                                   lambda *_: self.queue_privileged(["pause", "off"]))
         self.pin_banner = Adw.Banner(
@@ -2013,7 +2060,7 @@ class Window(Adw.ApplicationWindow):
         for persistent in (self.pause_banner, self.pin_banner):
             persistent.set_revealed(False)
             box.append(persistent)
-        self.banner = Adw.Banner()
+        self.banner = Adw.Banner(use_markup=False)
         self.banner.set_revealed(False)
         box.append(self.banner)
 
@@ -2201,7 +2248,7 @@ class Window(Adw.ApplicationWindow):
         except ValueError:
             return
         if not runs:
-            row = Adw.ActionRow(title="Nothing recorded yet")
+            row = ActionRow(title="Nothing recorded yet")
             self.history_expander.add_row(row)
             self.history_rows.append(row)
             return
@@ -2209,7 +2256,7 @@ class Window(Adw.ApplicationWindow):
             when = (run.get("when") or "")[:19].replace("T", " ")
             if run.get("kind") == "drill":
                 result = run.get("result", "?")
-                row = Adw.ActionRow(title="Recovery drill — %s" % result, subtitle=when)
+                row = ActionRow(title="Recovery drill — %s" % result, subtitle=when)
                 # by result, not unconditionally: a FAILED drill wearing a success icon is the
                 # green-light-that-lies this window keeps having to be talked out of
                 row.add_prefix(Gtk.Image.new_from_icon_name(
@@ -2221,7 +2268,7 @@ class Window(Adw.ApplicationWindow):
                 secs = run.get("seconds") or ""
                 detail = "%s%s" % (size if run.get("bytes") else "size not recorded",
                                    " in %ss" % secs if secs else "")
-                row = Adw.ActionRow(title="Backup — %s" % detail, subtitle=when)
+                row = ActionRow(title="Backup — %s" % detail, subtitle=when)
                 row.add_prefix(Gtk.Image.new_from_icon_name(
                     "document-save-symbolic" if run.get("result") == "ok"
                     else "dialog-warning-symbolic"))
@@ -2229,7 +2276,7 @@ class Window(Adw.ApplicationWindow):
             self.history_rows.append(row)
 
     def _check_row(self, group, title, subtitle, label, fn, destructive=False):
-        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        row = ActionRow(title=title, subtitle=subtitle)
         row.set_subtitle_lines(0)
         button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
         if destructive:
@@ -2276,12 +2323,12 @@ class Window(Adw.ApplicationWindow):
         # What this machine has actually been doing. The engine has recorded size and duration
         # since 1.9.0 and nothing ever showed it, so "is it still running, and is it still the
         # same size" was a question you could only answer by reading a log file as root.
-        self.history_expander = Adw.ExpanderRow(
+        self.history_expander = ExpanderRow(
             title="Recent runs", subtitle="Backups and drills, newest first")
         self.history_rows = []
         group.add(self.history_expander)
 
-        full = Adw.ActionRow(
+        full = ActionRow(
             title="Full log",
             subtitle="Everything the scheduled runs have written, from the system journal")
         open_full = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
@@ -2289,7 +2336,7 @@ class Window(Adw.ApplicationWindow):
         full.add_suffix(open_full)
         group.add(full)
 
-        self.log_expander = Adw.ExpanderRow(title="Log",
+        self.log_expander = ExpanderRow(title="Log",
                                             subtitle="Output from the command-line tool")
         self.logview = Gtk.TextView(
             editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR,
@@ -2301,7 +2348,7 @@ class Window(Adw.ApplicationWindow):
         group.add(self.log_expander)
 
     def _row(self, group, title, icon):
-        row = Adw.ActionRow(title=title, subtitle="…")
+        row = ActionRow(title=title, subtitle="…")
         row.add_prefix(Gtk.Image.new_from_icon_name(icon))
         group.add(row)
         return row
@@ -2328,7 +2375,7 @@ class Window(Adw.ApplicationWindow):
         self.logview.scroll_to_iter(buf.get_end_iter(), 0.0, False, 0, 0)
 
     def toast(self, text):
-        self.overlay.add_toast(Adw.Toast(title=text))
+        self.overlay.add_toast(Adw.Toast(title=text, use_markup=False))
 
     def report(self, text):
         self.log_line(text)
@@ -2946,7 +2993,7 @@ class Window(Adw.ApplicationWindow):
             self.kit_names = []
             detail = self._clean(out.strip().splitlines()[-1]) if out.strip() else ""
             self.kit_error.set_description(
-                detail + "\n\nNothing can be restored from here until this is fixed. "
+                GLib.markup_escape_text(detail) + "\n\nNothing can be restored from here until this is fixed. "
                          "Check the remote with `timecrate config`.")
             self.kit_stack.set_visible_child_name("error")
             return

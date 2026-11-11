@@ -11,7 +11,7 @@
 # Break-glass needs only gpg + zstd + tar (see docs/BREAK-GLASS.md).
 set -euo pipefail
 
-VERSION="3.2.0"
+VERSION="3.2.1"
 SELF="$(basename "$0")"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
@@ -2846,6 +2846,9 @@ dest_check(){
 remote_conf_facts(){
   local name="${TC_RNAME:-$(remote_name)}"
   [ -n "$name" ] || return 0
+  # The Drive remote is in its own config, and `config dump` names no remote for rc() to go by.
+  # Read from the main one, a signed-in Drive destination was "not configured, not signed in".
+  [ "$name" != "$DRIVE_REMOTE" ] || local TC_RC_CONF="${TC_RC_CONF:-$DRIVE_CONF}"
   rc --ask-password=false config dump </dev/null 2>/dev/null | TC_RNAME="$name" python3 -c '
 import json, os, sys
 try:
@@ -2960,14 +2963,6 @@ print(json.dumps({
   local rtype; rtype="$(printf '%s' "${facts:-}" | python3 -c 'import json,sys
 try: print((json.load(sys.stdin) or {}).get("type",""))
 except Exception: print("")' 2>/dev/null || true)"
-  # the Drive remote lives in its own config: a status that only reads the main one
-  # reports NOT CONFIGURED for a signed-in, reachable Drive — the split-brain this
-  # command exists to end. Consult the drive facts when the path names that remote.
-  if [ -z "$rtype" ] && [ "$name" = "$DRIVE_REMOTE" ]; then
-    rtype="$(printf '%s' "${dfacts:-}" | python3 -c 'import json,sys
-try: print((json.load(sys.stdin) or {}).get("type",""))
-except Exception: print("")' 2>/dev/null || true)"
-  fi
   if remote_is_local; then
     printf '  backend      a folder on this machine\n'
   elif [ -n "$rtype" ]; then
@@ -3046,12 +3041,22 @@ remote_connect(){
     log "  pick the backup folder:  $SELF remote browse $name:   then   $SELF remote set-path $name:<folder>"
     return 0
   fi
-  # with no remote named yet (none set, or a folder), the provider's own name is the remote's
-  local name; name="$(remote_name)"; [ -n "$name" ] || name="$provider"
+  # With no remote named yet (none set, or a folder), the provider's own name is the remote's. So
+  # it is when the remote in use is another kind: `config create` replaces a remote whole, and a
+  # sign-in to Dropbox made an S3 or Drive destination's remote a Dropbox one under the same name.
+  # Known gap: a main config that needs a password hides its kinds from this check.
+  local name kind=""
+  for name in "$(remote_name)" "$provider"; do
+    [ -n "$name" ] || continue
+    kind="$(TC_RNAME="$name" remote_conf_facts | sed -n 's/.*"type": "\([^"]*\)".*/\1/p')"
+    # The Drive sign-in's name is Drive's whether or not it is signed in: rc() reads that name
+    # from the Drive config only, so another provider's remote under it is one nothing would use.
+    [ "$name" != "$DRIVE_REMOTE" ] || kind="${kind:-drive}"
+    { [ -n "$kind" ] && [ "$kind" != "$provider" ]; } || break
+  done
   case "$name" in *[!A-Za-z0-9._-]*|-*) die "'$name' cannot be an rclone remote name";; esac
-
-  local existing; existing="$(TC_RNAME="$name" remote_conf_facts)"
-  if printf '%s' "$existing" | grep -q '"type": *"[^"]'; then
+  if [ -n "$kind" ]; then
+    [ "$kind" = "$provider" ] || die "the rclone remote '$name' is a $kind remote, and a $provider sign-in under that name would replace it. Nothing was changed — rename or remove it with 'rclone config' first."
     [ "$force" = 1 ] || die "an rclone remote called '$name' already exists. Pass --reauthorize to replace its credentials (the backups themselves are untouched)."
   fi
 
@@ -3314,6 +3319,8 @@ remote_disconnect(){
   fi
   write_user_setting TIMECRATE_REMOTE ""
   if [ "$drop_rclone" = 1 ] && [ -n "$name" ]; then
+    # the Drive remote is in its own config: deleting the name from the main one removed nothing
+    [ "$name" != "$DRIVE_REMOTE" ] || local TC_RC_CONF="$DRIVE_CONF"
     rc config delete "$name" >/dev/null 2>&1 && log "removed the rclone remote '$name'" \
       || warn "could not remove the rclone remote '$name'"
   fi

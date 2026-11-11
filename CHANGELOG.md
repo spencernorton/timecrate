@@ -4,6 +4,28 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.2.1 — 2026-11-11
+
+- **The Remote page tells the truth about a Google Drive destination.** With the backups on the
+  Google Drive sign-in, the page said "no rclone remote called gdrive yet" and "not signed in"
+  next to "Reachable: OK": `remote status --json` looked for the remote in the main rclone
+  configuration, and the Drive sign-in keeps its own. It reads the right file now, as the text
+  form of `remote status` already did.
+- **A name with an ampersand or angle brackets no longer blanks its row.** The window's rows,
+  toasts and banners read their text as markup, and text that does not parse was dropped. So the
+  Google Drive row was always blank (its text ends in `gdrive:<folder>`), and so was a folder
+  called "R&D" in the folder picker, a path like it in the include list, and any message from
+  the engine that names `<remote>:<path>`. The text is shown as it is.
+- **Signing in to Dropbox never replaces another remote.** The Remote page showed a
+  destination on any other rclone remote (S3, SFTP, OneDrive) as "Dropbox", with a
+  "Re-authorise…" button, and `remote connect --reauthorize` made the remote in use a Dropbox
+  one under the same name, whatever kind it was. The page shows such a destination as "Another
+  rclone remote". `remote connect` signs in under the provider's own name when the remote in
+  use is another kind or has the Google Drive sign-in's name, the window then asks which
+  folder, and a remote of another kind that already has that name is refused.
+  `remote disconnect --remove-rclone-remote` removes a Google Drive sign-in from the file it
+  is in.
+
 ## 3.2.0 — 2026-11-11
 
 - **Root no longer acts on files in the account's home (security).** The engine runs as root
