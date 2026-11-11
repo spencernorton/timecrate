@@ -1,3 +1,20 @@
+timecrate (3.2.2) resolute; urgency=medium
+
+  * A check for deleted kits that could not list the destination is made
+    once the backup's upload is there. In 3.2.0 and 3.2.1 it was skipped,
+    and the count recorded at the end of the same run took a deletion with
+    it.
+  * The count a backup records is what its check saw, plus the new kit,
+    less what retention dropped. It was a fresh count, which took in any
+    kit deleted while the upload ran, and was 0 when the listing failed.
+  * Retention reports a kit it could not delete, and the count still
+    holds it.
+  * The nightly wrapper's alert says which kind of remote alert it carries
+    and whether the backup completed.
+  * The man page says each machine needs a destination of its own.
+
+ -- Norvi <apt@globalentry.systems>  Wed, 11 Nov 2026 10:10:00 +0000
+
 timecrate (3.2.1) resolute; urgency=medium
 
   * The window's Remote page reads a Google Drive destination from the Drive

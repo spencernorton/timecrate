@@ -1,4 +1,4 @@
-.TH TIMECRATE 1 "2026-11-11" "timecrate 3.2.1" "System Administration"
+.TH TIMECRATE 1 "2026-11-11" "timecrate 3.2.2" "System Administration"
 .SH NAME
 timecrate \- encrypted, signed, off\-site disaster\-recovery backup
 .SH SYNOPSIS
@@ -392,8 +392,10 @@ Kits are materialised and verified before anything is extracted, never streamed 
 .TP
 .B Anti\-rollback
 Each upload records the expected newest kit and count, and the destination they are for: a
-changed destination starts a new count, and a listing that fails is reported as not checked
-rather than as kits deleted. Restoring anything older needs
+changed destination starts a new count. The count is what the check before the upload saw,
+plus the new kit, less what retention dropped, so a kit deleted while an upload runs is reported
+by the next backup. A listing that fails is not read as kits deleted: the backup checks again
+once its upload is there, and alerts if it still cannot list. Restoring anything older needs
 .BR \-\-force ,
 and the backup and drill both alert on unexpected deletion or rollback on the remote \(em an old
 kit carries a perfectly valid signature, so signing alone cannot catch this.
