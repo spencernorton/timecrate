@@ -150,6 +150,23 @@ def same_calendar(a, b):
     return CALENDAR_ALIASES.get(a, a) == CALENDAR_ALIASES.get(b, b)
 
 
+# The "Daily at a time you choose" entry: its calendar is built from the time field when saved.
+TIME_CHOICE = "@time"
+DAILY_AT_RE = re.compile(r"\*-\*-\* (\d\d):(\d\d):00")
+PAUSE_CHOICES = [("1d", "1 day"), ("3d", "3 days"), ("7d", "7 days"), ("30d", "30 days")]
+# What `timecrate pause` accepts, as the largest count per unit (the engine's cap is 30 days).
+PAUSE_MAX = {"m": 30 * 24 * 60, "h": 30 * 24, "d": 30}
+LOGIN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9._-]{0,31}")
+
+
+def parse_clock(text):
+    """'H:MM' or 'HH:MM' from 00:00 to 23:59 as 'HH:MM'; None for anything else."""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
+    if m and int(m[1]) <= 23 and int(m[2]) <= 59:
+        return "%02d:%s" % (int(m[1]), m[2])
+    return None
+
+
 def user_config_path():
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(GLib.get_home_dir(), ".config")
     return os.path.join(base, "timecrate", "timecrate.conf")
@@ -367,7 +384,8 @@ class SettingsDialog(Adw.PreferencesDialog):
         for unit, title, subtitle, choices in (
             ("backup", "Back up", "How often a new encrypted archive is made and uploaded.",
              [("daily", "Daily"), ("*-*-* 03:00:00", "Daily at 03:00"),
-              ("weekly", "Weekly"), ("hourly", "Hourly")]),
+              ("weekly", "Weekly"), ("hourly", "Hourly"),
+              (TIME_CHOICE, "Daily at a time you choose")]),
             ("drill", "Recovery drill",
              "Proves the escrowed key still decrypts a real archive. A backup that has never "
              "been restored is a hypothesis.",
@@ -382,11 +400,38 @@ class SettingsDialog(Adw.PreferencesDialog):
             row.set_selected(0)
             group.add(row)
             self.schedule_rows[unit] = (row, choices)
+            if unit == "backup":
+                self.time_row = Adw.EntryRow(title="Time of day (HH:MM, 24-hour)")
+                self.time_row.set_text("03:00")
+                self.time_row.set_visible(False)
+                group.add(self.time_row)
+                row.connect("notify::selected", lambda *_: self._sync_time_row())
 
         self.schedule_note = Adw.ActionRow(title="Reading the current schedule…", subtitle="")
         self.schedule_note.set_subtitle_selectable(True)
         group.add(self.schedule_note)
         self._load_schedule()
+
+        pause = Adw.PreferencesGroup(
+            title="Pause",
+            description="Skips scheduled backups until the time is up; the recovery drill still "
+                        "runs. Applied when you close this window, with administrator approval.")
+        sched.add(pause)
+        paused = status.get("paused_until") or ""
+        self.pause_row = Adw.ComboRow(
+            title="Pause scheduled backups",
+            subtitle="Paused until %s" % paused[:19].replace("T", " ") if paused
+            else "Not paused")
+        pause_model = Gtk.StringList()
+        pause_model.append("Not paused")
+        for _value, label in PAUSE_CHOICES:
+            pause_model.append(label)
+        if paused:      # the running pause is not one of the presets; show it rather than "Not paused"
+            pause_model.append("Paused until %s" % paused[:19].replace("T", " "))
+        self.pause_row.set_model(pause_model)
+        self.pause_row.set_selected(len(PAUSE_CHOICES) + 1 if paused else 0)
+        pause.add(self.pause_row)
+        self._pause_baseline = self.pause_row.get_selected()
 
         alerts = Adw.PreferencesGroup(
             title="If something goes wrong",
@@ -499,10 +544,16 @@ class SettingsDialog(Adw.PreferencesDialog):
                     continue
                 calendar = " ".join(parts[2:]).split("next:")[0].strip()
                 for i, (value, _label) in enumerate(choices):
-                    if same_calendar(value, calendar):
+                    if value != TIME_CHOICE and same_calendar(value, calendar):
                         row.set_selected(i + 1)
                         break
                 else:
+                    daily = DAILY_AT_RE.fullmatch(calendar) if parts[0] == "backup" else None
+                    if daily:
+                        self.time_row.set_text("%s:%s" % daily.groups())
+                        row.set_selected(
+                            [v for v, _l in choices].index(TIME_CHOICE) + 1)
+                        continue
                     # Enabled on a calendar this window does not offer. Showing the first preset
                     # here would state a schedule that is not the one running — `*-*-* 04:00:00`
                     # displayed as "Daily" is the same misreporting this dialog exists to end.
@@ -511,9 +562,51 @@ class SettingsDialog(Adw.PreferencesDialog):
                     choices.append((calendar, "Custom — %s" % calendar))
                     row.get_model().append("Custom — %s" % calendar)
                     row.set_selected(len(choices))
-            self._schedule_baseline = {u: r.get_selected() for u, (r, _c) in self.schedule_rows.items()}
+            self._schedule_baseline = self._schedule_keys()
 
         run_async([TC, "schedule"], done)
+
+    def _sync_time_row(self):
+        row, choices = self.schedule_rows["backup"]
+        selected = row.get_selected()
+        self.time_row.set_visible(selected > 0 and choices[selected - 1][0] == TIME_CHOICE)
+
+    def _schedule_keys(self):
+        """What each timer row says right now; the time only counts while its choice is selected."""
+        keys = {}
+        for unit, (row, choices) in self.schedule_rows.items():
+            selected = row.get_selected()
+            timed = unit == "backup" and selected > 0 and choices[selected - 1][0] == TIME_CHOICE
+            keys[unit] = (selected, self.time_row.get_text().strip() if timed else "")
+        return keys
+
+    def _schedule_changes(self):
+        """Privileged argument lists for the schedule rows that differ from when they loaded.
+
+        None if an entry is invalid, after saying so: the caller applies nothing in that case.
+        """
+        out = []
+        keys = self._schedule_keys()
+        for unit, (row, choices) in self.schedule_rows.items():
+            if not self._schedule_baseline or keys[unit] == self._schedule_baseline.get(unit):
+                continue
+            selected = row.get_selected()
+            if selected == 0:
+                out.append(["schedule", unit, "off"])
+                continue
+            value = choices[selected - 1][0]
+            if value == TIME_CHOICE:
+                clock = parse_clock(keys[unit][1])
+                if clock is None:
+                    self.window.report("Not saved: enter the backup time as HH:MM, from 00:00 "
+                                       "to 23:59.")
+                    return None
+                value = "*-*-* %s:00" % clock
+            out.append(["schedule", unit, "on", "--at", value])
+        selected = self.pause_row.get_selected()
+        if selected != self._pause_baseline:
+            out.append(["pause", "off"] if selected == 0 else ["pause", PAUSE_CHOICES[selected - 1][0]])
+        return out
 
     def _read_rows(self):
         values = {}
@@ -529,34 +622,36 @@ class SettingsDialog(Adw.PreferencesDialog):
                                "(%s is not below %s)." % (values["TIMECRATE_MIN_MB"],
                                                           values["TIMECRATE_MAX_MB"]))
             return
+        # Validated before anything is applied, so a bad entry never leaves half a save behind.
+        schedule = self._schedule_changes()
+        if schedule is None:
+            return
         # ONLY what actually changed. Writing every row on close means this dialog re-asserts
         # values it read when it opened, so anything altered elsewhere in the meantime gets
         # stamped back over — which is exactly how closing the window used to undo a folder
         # change made on the Remote page. Removing that setting fixed the instance; writing only
         # the differences removes the whole class.
         changed = {k: v for k, v in values.items() if v != self._baseline.get(k)}
-        if not changed:
+        if not changed and not schedule:
             return
-        try:
-            path = write_user_config(changed)
-        except OSError as exc:
-            self.window.report("Could not save settings: %s" % exc)
-            return
-        self._baseline = values
-        self.window.log_line("settings written to %s: %s" % (path, ", ".join(sorted(changed))))
-        self.window.toast("Settings saved")
+        if changed:
+            try:
+                path = write_user_config(changed)
+            except OSError as exc:
+                self.window.report("Could not save settings: %s" % exc)
+                return
+            self._baseline = values
+            self.window.log_line("settings written to %s: %s" % (path, ", ".join(sorted(changed))))
+            self.window.toast("Settings saved")
 
         # Timers are root-owned, so only send the ones actually changed: closing this dialog
-        # without touching the schedule must never raise an authentication prompt.
-        for unit, (row, choices) in self.schedule_rows.items():
-            selected = row.get_selected()
-            if not self._schedule_baseline or selected == self._schedule_baseline.get(unit):
-                continue
-            if selected == 0:
-                self.window.queue_privileged(["schedule", unit, "off"])
-            else:
-                self.window.queue_privileged(
-                    ["schedule", unit, "on", "--at", choices[selected - 1][0]])
+        # without touching the schedule must never raise an authentication prompt. A schedule
+        # change is saved even when no other setting moved.
+        for args in schedule:
+            self.window.queue_privileged(args)
+        if self._schedule_baseline:
+            self._schedule_baseline = self._schedule_keys()
+        self._pause_baseline = self.pause_row.get_selected()
         self.window.refresh()
 
 
@@ -724,6 +819,105 @@ class ImportKeyDialog(Adw.Dialog):
         dialog.present(self)
 
 
+def confirm_destination(window, target, parent, on_chosen, mirror=False, checking=None):
+    """Ask the engine what pointing the backups at `target` would cost, then do it on a yes.
+
+    `mirror` sets the second copy instead; `set-mirror` has no dry run, so that path only asks.
+    """
+    verb = "set-mirror" if mirror else "set-path"
+
+    def ask(body):
+        dialog = Adw.AlertDialog(
+            heading="Copy every backup to %s?" % target if mirror else "Use %s?" % target,
+            body=body)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("use", "Use this folder")
+        dialog.set_response_appearance("use", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_close_response("cancel")
+        window._dest_dialog = dialog        # kept so the smoke test can answer it
+
+        def answered(_d, response):
+            if response != "use":
+                return
+
+            def committed(ok, out):
+                if ok:
+                    if mirror:
+                        window.status["remote2"] = target   # until the next status refresh says so
+                    window.toast("A second copy will go to %s" % target if mirror
+                                 else "Backups will now go to %s" % target)
+                    on_chosen()
+                else:
+                    window.report(window._clean(
+                        out.strip().splitlines()[-1] if out.strip() else "") or "Failed.")
+
+            run_async([TC, "remote", verb, target, "--yes"], committed)
+
+        dialog.connect("response", answered)
+        dialog.present(parent)
+
+    if mirror:
+        ask("Each new backup is also copied there. It is a second place, not a replacement.")
+        return
+
+    def done(ok, out):
+        if checking:
+            checking(False)
+        body = "\n".join(window._clean(l) for l in out.strip().splitlines()
+                         if l.strip() and "DRY RUN" not in l)
+        if not ok:
+            window.report(body.splitlines()[-1] if body else "Could not check that folder.")
+            return
+        ask(body or "Future backups will be written here.")
+
+    run_async([TC, "remote", verb, target, "--dry-run"], done)
+
+
+def choose_local_folder(window, on_path):
+    dialog = Gtk.FileDialog()
+    dialog.set_title("Choose a folder on this computer or an attached drive")
+
+    def picked(source, result):
+        try:
+            path = source.select_folder_finish(result).get_path()
+        except GLib.Error:
+            return                          # cancelled — not an error worth reporting
+        if path:
+            on_path(path)
+
+    dialog.select_folder(window, None, picked)
+
+
+def choose_rclone_remote(window, on_name):
+    """Pick one of the rclone remotes this account already has; `remote list` names them."""
+    def done(ok, out):
+        try:
+            remotes = json.loads(out) if ok else None
+        except ValueError:
+            remotes = None
+        if remotes is None:
+            window.report("Could not list the rclone remotes.")
+            return
+        if not remotes:
+            dialog = Adw.AlertDialog(
+                heading="No rclone remotes yet",
+                body="Add one in a terminal with `rclone config`, then come back here.")
+            dialog.add_response("close", "Close")
+        else:
+            dialog = Adw.AlertDialog(heading="Choose an rclone remote",
+                                     body="Next you pick a folder on it.")
+            dialog.add_response("cancel", "Cancel")
+            for r in remotes:
+                dialog.add_response("r:" + r["name"], "%s (%s)" % (r["name"], r.get("type", "?")))
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda _d, resp: on_name(resp[2:])
+                           if resp.startswith("r:") else None)
+        window._remote_dialog = dialog      # kept so the smoke test can inspect it
+        dialog.present(window)
+
+    run_async([TC, "remote", "list", "--json"], done)
+
+
 class FolderPicker(Adw.Dialog):
     """Walk the remote and choose a folder, instead of typing a path and hoping.
 
@@ -733,9 +927,9 @@ class FolderPicker(Adw.Dialog):
     invisible without anything being deleted.
     """
 
-    def __init__(self, window, start, on_chosen):
+    def __init__(self, window, start, on_chosen, mirror=False):
         super().__init__(title="Choose a folder", content_width=560, content_height=520)
-        self.window, self.on_chosen = window, on_chosen
+        self.window, self.on_chosen, self.mirror = window, on_chosen, mirror
         self.path = start or ""
         # Listings are async, so a fast enter-then-up leaves two in flight. Without this the
         # slower reply appends its folders under the other folder's title, and clicking one builds
@@ -866,42 +1060,15 @@ class FolderPicker(Adw.Dialog):
 
     def _confirm(self):
         """Ask the engine what this move would cost before doing it."""
-        target = self.path
-        self.choose.set_sensitive(False)
+        if not self.mirror:
+            self.choose.set_sensitive(False)    # re-enabled when the dry run answers
 
-        def done(ok, out):
-            self.choose.set_sensitive(True)
-            body = "\n".join(self.window._clean(l) for l in out.strip().splitlines()
-                             if l.strip() and "DRY RUN" not in l)
-            if not ok:
-                self.window.report(body.splitlines()[-1] if body else "Could not check that folder.")
-                return
-            dialog = Adw.AlertDialog(heading="Use %s?" % target, body=body or
-                                     "Future backups will be written here.")
-            dialog.add_response("cancel", "Cancel")
-            dialog.add_response("use", "Use this folder")
-            dialog.set_response_appearance("use", Adw.ResponseAppearance.SUGGESTED)
-            dialog.set_close_response("cancel")
+        def chosen():
+            self.close()
+            self.on_chosen()
 
-            def answered(_d, response):
-                if response != "use":
-                    return
-
-                def committed(ok2, out2):
-                    if ok2:
-                        self.window.toast("Backups will now go to %s" % target)
-                        self.close()
-                        self.on_chosen()
-                    else:
-                        self.window.report(self.window._clean(
-                            out2.strip().splitlines()[-1] if out2.strip() else "") or "Failed.")
-
-                run_async([TC, "remote", "set-path", target, "--yes"], committed)
-
-            dialog.connect("response", answered)
-            dialog.present(self)
-
-        run_async([TC, "remote", "set-path", target, "--dry-run"], done)
+        confirm_destination(self.window, self.path, self, chosen, self.mirror,
+                            checking=self.choose.set_sensitive)
 
 
 class CoverageDialog(Adw.Dialog):
@@ -1155,17 +1322,32 @@ class RemotePage(Adw.PreferencesPage):
         provider_model = Gtk.StringList()
         provider_model.append("Google Drive")
         provider_model.append("Dropbox")
+        provider_model.append("Folder on this computer or an attached drive")
+        provider_model.append("Another rclone remote")
         self.provider_row.set_model(provider_model)
         self.provider_row.set_selected(0)
         self.provider_row.connect("notify::selected", lambda *_: self._provider_changed())
         conn.add(self.provider_row)
         self.r_drive = self._row(conn, "Google Drive", "folder-remote-symbolic")
 
+        mirror = Adw.PreferencesGroup(
+            title="Second copy",
+            description="Every backup is also copied to a second place, so losing one place does "
+                        "not lose them. The second copy is only as safe as where it is.")
+        self.add(mirror)
+        self.mirror_row = Adw.ActionRow(title="Second copy", subtitle="…")
+        self.mirror_row.set_subtitle_selectable(True)
+        change = Gtk.Button(label="Change…", valign=Gtk.Align.CENTER)
+        change.connect("clicked", lambda *_: self._change_mirror())
+        self.mirror_row.add_suffix(change)
+        mirror.add(self.mirror_row)
+
         act = Adw.PreferencesGroup(title="Actions")
         self.add(act)
         self.btn_connect = self._action(
             act, "Connect", "Sign in to the provider and store the authorisation for rclone. "
             "Opens your browser.", "Connect…", self._connect)
+        self.row_connect = self.btn_connect.get_ancestor(Adw.ActionRow)
         self.btn_test = self._action(
             act, "Test this connection",
             "Checks that the folder can be listed AND written to. A remote that lists but refuses "
@@ -1175,6 +1357,7 @@ class RemotePage(Adw.PreferencesPage):
             "Stops this machine using it. Your backups are not deleted, and access is not revoked "
             "at the provider.", "Forget…", self._disconnect)
 
+        self._render_mirror()
         self.reload()
 
     def _row(self, group, title, icon):
@@ -1216,7 +1399,12 @@ class RemotePage(Adw.PreferencesPage):
     def _render(self):
         d, w = self.info, self.window
         remote = d.get("remote") or ""
+        local = (d.get("type") or "") == "local"
+        self.r_path.set_title("Folder on this computer" if local else "Folder")
         self.r_path.set_subtitle(remote or "none — this machine is not pointed at a remote")
+        # A local folder has no account and no sign-in; showing those rows would be inventing state.
+        self.r_account.set_visible(not local)
+        self.r_token.set_visible(not local)
         if d.get("configured"):
             self.r_account.set_subtitle(d.get("account") or "%s (rclone remote \"%s\")"
                                         % (d.get("type", ""), d.get("name", "")))
@@ -1250,26 +1438,94 @@ class RemotePage(Adw.PreferencesPage):
         else:
             self.r_drive.set_subtitle("not signed in — choose Google Drive, then Sign in")
         self.btn_test.set_sensitive(bool(remote))
-        self.btn_disconnect.set_sensitive(bool(remote))
+        self.btn_disconnect.set_sensitive(bool(remote) and not local)
+        self._render_mirror()
         # the provider choice starts from the remote this machine actually uses, so the
         # Connect button keeps describing THAT sign-in until the user picks another
         rtype = (d.get("type") or "").lower()
         self.provider_row.set_selected(
-            0 if rtype == "drive" or not d.get("configured") else 1)
+            2 if local else 0 if rtype == "drive" or not d.get("configured") else 1)
         self._provider_changed()
 
     # ---------- actions ----------
 
     def _browse(self):
         start = self.info.get("remote") or ""
+        if self.info.get("type") == "local":    # `remote browse` lists rclone remotes only
+            self._pick_local()
+            return
         FolderPicker(self.window, start, self._after_change).present(self.window)
+
+    def _pick_local(self):
+        choose_local_folder(self.window, lambda path: confirm_destination(
+            self.window, path, self.window, self._after_change))
+
+    def _pick_rclone(self):
+        choose_rclone_remote(self.window, lambda name: FolderPicker(
+            self.window, name + ":", self._after_change).present(self.window))
+
+    def _render_mirror(self):
+        self.mirror_row.set_subtitle(
+            self.window.status.get("remote2") or "Off — backups go to one place")
+
+    def _change_mirror(self):
+        dialog = Adw.AlertDialog(
+            heading="Second copy",
+            body="Every backup is also copied to the place you choose. A folder on the same "
+                 "disk does not protect against that disk failing.")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("off", "Turn off")
+        dialog.add_response("local", "Folder on this computer…")
+        dialog.add_response("rclone", "Another rclone remote…")
+        dialog.set_response_enabled("off", bool(self.window.status.get("remote2")))
+        dialog.set_close_response("cancel")
+        self._mirror_dialog = dialog            # kept so the smoke test can answer it
+
+        def done():
+            self._render_mirror()
+            self.window.refresh()
+
+        def answered(_d, response):
+            if response == "off":
+                def off(ok, out):
+                    if ok:
+                        self.window.status["remote2"] = ""
+                        self.window.toast("The second copy is off")
+                        done()
+                    else:
+                        self.window.report(self.window._clean(
+                            out.strip().splitlines()[-1] if out.strip() else "") or "Failed.")
+
+                run_async([TC, "remote", "set-mirror", "off", "--yes"], off)
+            elif response == "local":
+                choose_local_folder(self.window, lambda path: confirm_destination(
+                    self.window, path, self.window, done, mirror=True))
+            elif response == "rclone":
+                choose_rclone_remote(self.window, lambda name: FolderPicker(
+                    self.window, name + ":", done, mirror=True).present(self.window))
+
+        dialog.connect("response", answered)
+        dialog.present(self.window)
 
     def _after_change(self):
         self.reload()
         self.window.refresh()
 
     def _provider_changed(self):
-        if self.provider_row.get_selected() == 0:      # Google Drive
+        kind = self.provider_row.get_selected()
+        if kind >= 2:                                  # a folder, or a remote already in rclone
+            self.row_connect.set_title("Choose a folder" if kind == 2 else "Choose a remote")
+            self.row_connect.set_subtitle(
+                "The folder must be writable by this account. A folder on the same disk does "
+                "not protect against that disk failing — use an attached drive or another "
+                "machine." if kind == 2 else
+                "Use a remote you already set up with `rclone config`, then pick a folder on it.")
+            self.btn_connect.set_label("Choose folder…" if kind == 2 else "Choose remote…")
+            return
+        self.row_connect.set_title("Connect")
+        self.row_connect.set_subtitle("Sign in to the provider and store the authorisation for "
+                                      "rclone. Opens your browser.")
+        if kind == 0:      # Google Drive
             self.btn_connect.set_label(
                 "Re-authorise Google…" if self.info.get("drive_signed_in")
                 else "Sign in with Google…")
@@ -1278,7 +1534,11 @@ class RemotePage(Adw.PreferencesPage):
                 "Re-authorise…" if self.info.get("configured") else "Connect…")
 
     def _connect(self):
-        drive = self.provider_row.get_selected() == 0
+        kind = self.provider_row.get_selected()
+        if kind >= 2:
+            (self._pick_local if kind == 2 else self._pick_rclone)()
+            return
+        drive = kind == 0
         argv = ([TC, "remote", "connect", "--provider", "drive"] if drive
                 else [TC, "remote", "connect"])
         if (drive and self.info.get("drive_configured")) or (not drive and self.info.get("configured")):
@@ -1736,6 +1996,18 @@ class Window(Adw.ApplicationWindow):
         view.add_top_bar(header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # Persistent state, kept apart from `banner`, which every run and every error overwrites.
+        self.pause_banner = Adw.Banner(button_label="Resume")
+        self.pause_banner.connect("button-clicked",
+                                  lambda *_: self.queue_privileged(["pause", "off"]))
+        self.pin_banner = Adw.Banner(
+            title="Scheduled backups are not tied to this account yet, so the nightly run cannot "
+                  "find the keys.", button_label="Use this account")
+        self.pin_banner.connect("button-clicked", lambda *_: self.queue_privileged(
+            ["config", "set-user", GLib.get_user_name()]))
+        for persistent in (self.pause_banner, self.pin_banner):
+            persistent.set_revealed(False)
+            box.append(persistent)
         self.banner = Adw.Banner()
         self.banner.set_revealed(False)
         box.append(self.banner)
@@ -2109,8 +2381,8 @@ class Window(Adw.ApplicationWindow):
             comments="Encrypted off-site disaster-recovery backup.\n\nEverything this window does "
                      "is carried out by the `timecrate` command, so a machine with no graphical "
                      "session loses no capability.",
-            website="https://github.com/spencercnorton/timecrate",
-            issue_url="https://github.com/spencercnorton/timecrate/issues",
+            website="https://github.com/spencernorton/timecrate",
+            issue_url="https://github.com/spencernorton/timecrate/issues",
             license_type=Gtk.License.GPL_2_0)
         about.add_credit_section("Backups run as", [self.status.get("user") or "?"])
         about.present(self)
@@ -2156,8 +2428,15 @@ class Window(Adw.ApplicationWindow):
             return (os.path.isfile(args[1]) and os.access(args[1], os.R_OK)
                     and os.path.isdir(args[2]) and os.access(args[2], os.R_OK)
                     and os.path.realpath(args[2]) != "/")
-        if args in (["escrow-confirm"], ["alerts", "test"]):
+        if args in (["escrow-confirm"], ["alerts", "test"], ["pause", "off"]):
             return True
+        # pause <N>[mhd]: a positive count within the engine's 30-day cap, nothing else.
+        if args[:1] == ["pause"] and len(args) == 2:
+            m = re.fullmatch(r"([1-9][0-9]{0,5})([mhd])", args[1])
+            return bool(m) and int(m[1]) <= PAUSE_MAX[m[2]]
+        # config set-user <login>: pins the account the timers act for; a plain login name only.
+        if args[:2] == ["config", "set-user"] and len(args) == 3:
+            return bool(LOGIN_RE.fullmatch(args[2]))
         # paths <include|exclude> <add|remove> <path>: the list name comes from a fixed pair and
         # the engine re-validates the path itself (no newline, no ..), so this stays an
         # enumeration rather than a pattern that could be talked into something else.
@@ -2370,7 +2649,8 @@ class Window(Adw.ApplicationWindow):
             "recovery-drill": "Running a recovery drill", "restore": "Restoring",
             "schedule": "Updating the schedule", "escrow-confirm": "Recording the escrow",
             "paths": "Updating the backup list", "alerts": "Sending a test alert",
-            "break-glass": "Break-glass recovery",
+            "break-glass": "Break-glass recovery", "pause": "Updating the pause",
+            "config": "Pinning the account",
         }.get(self.current_kind, "Working")
 
     def _operation_success(self):
@@ -2481,6 +2761,7 @@ class Window(Adw.ApplicationWindow):
             "backup": "Backup complete", "dry-run": "Preview complete",
             "recovery-drill": "Recovery drill passed",
             "restore": "Restore staged for inspection", "schedule": "Schedule updated",
+            "pause": "Pause updated", "config": "Account pinned",
         }.get(kind, "Done")
 
     def _clean(self, line):
@@ -2578,6 +2859,14 @@ class Window(Adw.ApplicationWindow):
             return
 
         self.status = data
+        # A paused machine that looks healthy is the failure to avoid, so this sits above
+        # everything else and stays until the pause is gone. A missing key (an older engine) is
+        # taken as pinned: nothing can be said about what it did not report.
+        paused = data.get("paused_until") or ""
+        self.pause_banner.set_title("Scheduled backups are paused until %s. Nothing runs on its "
+                                    "own until then." % paused[:19].replace("T", " "))
+        self.pause_banner.set_revealed(bool(paused))
+        self.pin_banner.set_revealed(data.get("user_pinned", True) is False)
         self.r_last.set_subtitle(self._last_backup_text(data.get("last_backup") or ""))
 
         count = data.get("cloud_kits", "")
