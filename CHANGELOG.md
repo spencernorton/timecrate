@@ -4,6 +4,30 @@ All notable changes to Timecrate are documented here.
 
 ## Unreleased
 
+## 3.2.2 — 2026-11-11
+
+- **A check for deleted kits that could not list the destination is no longer skipped.** Since
+  3.2.0, a backup whose check could not list the destination (an outage at 03:00) said so and
+  went on, where it used to report every kit as deleted. The same run then recorded what the
+  destination held as the new count, so kits deleted before that night were never reported. The
+  check is now made once the run's own upload is there, leaving out the kit it added. If the
+  destination still cannot be listed, the run raises a remote alert that says so.
+- **The count a backup records follows from what its check saw.** After the upload, the engine
+  counted the kits at the destination afresh and recorded that as the number to expect. A kit
+  deleted between the check and that count, while the upload ran, was taken into the new number
+  and never reported. The number recorded is now the kits the check saw, plus the new kit, less
+  the kits retention dropped, so the next backup reports it. When that fresh count failed, 0 was
+  recorded, and the next backup's count check passed whatever was there; a count is now taken
+  only for a first anchor. Both are older than 3.2.0.
+- **Retention reports a kit it could not delete.** A delete that failed (a key without that
+  right, an append-only share) was passed over in silence. It is now a warning, the kit keeps
+  its checksum and metadata files and is still counted, and it is tried again at the next backup.
+- The nightly wrapper's alert says which kind of remote alert it carries (kits deleted or rolled
+  back, a check for that which could not be made, an incomplete kit) and whether the backup
+  itself completed. It said that kits were deleted or rolled back and that the backup was OK,
+  whichever it was. Its subject is now "Timecrate REMOTE alert on <host>".
+- The man page says that each machine needs a destination of its own (the README already did).
+
 ## 3.2.1 — 2026-11-11
 
 - **The Remote page tells the truth about a Google Drive destination.** With the backups on the

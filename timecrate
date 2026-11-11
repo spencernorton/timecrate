@@ -11,7 +11,7 @@
 # Break-glass needs only gpg + zstd + tar (see docs/BREAK-GLASS.md).
 set -euo pipefail
 
-VERSION="3.2.1"
+VERSION="3.2.2"
 SELF="$(basename "$0")"
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
@@ -1270,8 +1270,9 @@ cmd_backup(){
 
   if [ $upload = 1 ]; then
     # deletion/rollback check BEFORE this upload advances the anchor — daily, not monthly
-    check_remote_anchor "$REMOTE" expected
-    [ -z "$REMOTE2" ] || check_remote_anchor "$REMOTE2" expected2
+    local late="" late2="" base="" base2="" pruned=0 pruned2=0
+    check_remote_anchor "$REMOTE" expected || late=1; base="$ANCHOR_BASE"
+    if [ -n "$REMOTE2" ]; then check_remote_anchor "$REMOTE2" expected2 || late2=1; base2="$ANCHOR_BASE"; fi
     log "uploading to $REMOTE (checked on the remote before the local copy goes)…"
     require_remote
     rc_put "$kit"  "$REMOTE/$(basename "$kit")"  || die "upload FAILED — kit kept locally: $kit"
@@ -1280,6 +1281,9 @@ cmd_backup(){
     # confirm the kit is actually on the remote before we delete the only local copy
     rc lsf "$REMOTE" --include "$(basename "$kit")" | grep -q . \
       || die "upload verify FAILED — kit not found on remote; keeping local copy $kit"
+    # A check that could not list is made now, when the destination has just answered, without
+    # the kit this run added: a check that is only skipped is a deletion nobody looked for.
+    if [ -n "$late" ]; then check_remote_anchor "$REMOTE" expected "$(basename "$kit")"; base="$ANCHOR_BASE"; fi
     # 3-2-1: mirror to the second remote (different vendor) BEFORE the local copy goes away
     if [ -n "$REMOTE2" ]; then
       log "mirroring to $REMOTE2…"
@@ -1289,22 +1293,16 @@ cmd_backup(){
       rc_put "$meta" "$REMOTE2/$(basename "$meta")" || die "second-remote mirror FAILED (meta) — kit kept locally: $kit"
       rc lsf "$REMOTE2" --include "$(basename "$kit")" | grep -q . \
         || die "second-remote verify FAILED — kit not found on $REMOTE2; keeping local copy $kit"
-      prune_remote "$REMOTE2" "$(basename "$kit")"
+      if [ -n "$late2" ]; then check_remote_anchor "$REMOTE2" expected2 "$(basename "$kit")"; base2="$ANCHOR_BASE"; fi
+      prune_remote "$REMOTE2" "$(basename "$kit")"; pruned2="$PRUNED"
     fi
-    prune_remote "$REMOTE" "$(basename "$kit")"
+    prune_remote "$REMOTE" "$(basename "$kit")"; pruned="$PRUNED"
     # anti-rollback anchor: what the remote is EXPECTED to hold from now on. The drill alerts if
     # the remote ever shows an older newest-kit or fewer kits than recorded here (deletion /
     # rollback — a validly-signed OLD kit would otherwise pass every signature check).
-    local ecount
-    ecount="$(rc lsf "$REMOTE" --include "$KIT_GLOB" 2>/dev/null | wc -l | tr -d ' ' || true)"
     as_user mkdir -p "$STATE_DIR" 2>/dev/null || true
-    printf '%s %s %s\n' "$(basename "$kit")" "${ecount:-0}" "$REMOTE" | user_write "$STATE_DIR/expected" 2>/dev/null \
-      || warn "could not record the anti-rollback anchor ($STATE_DIR/expected)"
-    if [ -n "$REMOTE2" ]; then
-      local ecount2
-      ecount2="$(rc lsf "$REMOTE2" --include "$KIT_GLOB" 2>/dev/null | wc -l | tr -d ' ' || true)"
-      printf '%s %s %s\n' "$(basename "$kit")" "${ecount2:-0}" "$REMOTE2" | user_write "$STATE_DIR/expected2" 2>/dev/null || true
-    fi
+    anchor_write expected "$REMOTE" "$(basename "$kit")" "$base" "$pruned"
+    [ -z "$REMOTE2" ] || anchor_write expected2 "$REMOTE2" "$(basename "$kit")" "$base2" "$pruned2"
     rm -f "$kit" "$sha" "$meta"     # no local copies retained
     log "uploaded + verified on remote${REMOTE2:+ + mirrored to $REMOTE2} + local kit pruned."
   else
@@ -1362,6 +1360,23 @@ anchor_pin(){
     [ -z "$dest" ] || printf '%s %s+ %s\n' "$kit" "$count" "$dest" | user_write "$STATE_DIR/$a" || true
   done
 }
+# Record the anchor for destination $2 in state file $1: its newest kit ($3) and the number of
+# kits it should hold. That number is what this run's check saw there ($4) plus the kit just
+# added, less what retention dropped ($5). It is not a fresh count: one taken after the upload
+# takes in whatever was deleted since the check, and that deletion is then never reported. $4 is
+# the count the old anchor expected when the check could not be made, and empty when there was no
+# anchor to check against: then it is a first count of what is there.
+anchor_write(){
+  local n="${4%+}"
+  case "$n" in
+    ''|*[^0-9]*)
+      if kits_at "$2"; then n="$(printf '%s\n' "$KITS_AT" | grep -c . || true)"
+      else n=0; warn "could not list $2 (${RC_ERR:-rclone gave no reason}) — its anchor records the newest kit and no count until the next backup"; fi;;
+    *) n=$(( 10#$n + 1 - ${5:-0} )); [ "$n" -ge 0 ] || n=0; n="$n${4#"${4%+}"}";;
+  esac
+  printf '%s %s %s\n' "$3" "$n" "$2" | user_write "$STATE_DIR/$1" 2>/dev/null \
+    || warn "could not record the anti-rollback anchor ($STATE_DIR/$1)"
+}
 # Whether destination $3, holding $2 kits now, is short of the count an anchor gives ($1). A count
 # marked "+" is owed the folders there, which is how that release counted: the first check after
 # the upgrade would otherwise read as that many kits deleted.
@@ -1379,15 +1394,28 @@ anchor_short(){
 # Rewind, B2 lifecycle, S3 versioning) forgets. The REMOTE-ALERT marker is what backup-and-alert.sh
 # pages on. Kits are compared by timestamp, so an anchor written before 3.0.0 (a previous-name kit)
 # reads correctly against a newer kit of either name.
+# Fails when the destination could not be listed. The backup then calls again once its upload is
+# there, with that kit as $3 to leave out, and a second failure is reported, not passed over.
+# ANCHOR_BASE is left as the count the next anchor starts from (see anchor_write): the kits seen
+# here, or the count expected when they could not be seen, or nothing when no anchor applies.
+ANCHOR_BASE=""
 check_remote_anchor(){
   local remote="$1" anchor
   local exp_l="" exp_c="" listing cur_l cur_c out=""
+  ANCHOR_BASE=""
   anchor="$(anchor_for "$2" "$remote")" || return 0
   read -r exp_l exp_c _ <<< "$anchor" || true
-  kits_at "$remote" || { warn "could not list $remote (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is not checked this run"; return 0; }
+  if ! kits_at "$remote"; then
+    [ -n "${3:-}" ] || { warn "could not list $remote (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is checked once this run's upload is there"; return 1; }
+    ANCHOR_BASE="$exp_c"
+    warn "REMOTE-ALERT: could not list $remote before or after this upload (${RC_ERR:-rclone gave no reason}) — whether kits were deleted there is NOT known (expected >= ${exp_c%+}, newest $exp_l). Compare with '$SELF list'."
+    return 0
+  fi
   listing="$KITS_AT"
+  [ -z "${3:-}" ] || listing="$(printf '%s\n' "$listing" | grep -vFx -- "$3" || true)"
   cur_l="$(printf '%s\n' "$listing" | tail -1)"
   cur_c="$(printf '%s\n' "$listing" | grep -c . || true)"
+  ANCHOR_BASE="$cur_c"
   if [ -n "$exp_l" ]; then
     if [ -z "$cur_l" ]; then
       out="$remote holds ZERO kits (expected ${exp_c%+}, newest $exp_l)"
@@ -1405,8 +1433,10 @@ check_remote_anchor(){
 # kit of each of the last $KEEP_YEARLY years. Everything else is dropped. Kits of both names are
 # one series, ordered by timestamp: a kit made before 3.0.0 counts as a daily, a monthly or a
 # yearly exactly as it did when it was written, and nothing is kept twice or dropped early.
+PRUNED=0   # set by prune_remote: the kits it dropped, which the anchor's count leaves out
 prune_remote(){
   local remote="$1" cur="${2:-}" keep="$KEEP" f
+  PRUNED=0
   case "${keep}${KEEP_MONTHLY}${KEEP_YEARLY}" in *[^0-9]*|'')
     warn "TIMECRATE_KEEP/_MONTHLY/_YEARLY must be numbers (got $keep/$KEEP_MONTHLY/$KEEP_YEARLY) — skipping prune"; return 0;; esac
   [ "$keep" -ge 1 ] || { warn "TIMECRATE_KEEP=$keep would prune EVERY kit — refusing"; return 0; }
@@ -1437,11 +1467,16 @@ prune_remote(){
     fi
     local base="${f%.tar.zst.gpg}"
     log "retention[$remote]: dropping $f"
-    rc delete "$remote/$f" 2>/dev/null || true
+    # A kit that could not be deleted is still there, and the anchor's count must still hold it:
+    # one recorded as gone is one that can be deleted later without the count falling short.
+    # (rclone's 3 and 4 say it is not there to delete: gone already, which is what was wanted.)
+    local drc=0; rc delete "$remote/$f" 2>/dev/null || drc=$?
+    case "$drc" in 0|3|4) dropped=$((dropped+1));;
+      *) warn "retention[$remote]: could not delete $f — it stays, and is tried again at the next backup"; continue;; esac
     rc delete "$remote/$base.tar.zst.gpg.sha256" 2>/dev/null || true
     rc delete "$remote/$base.meta.json" 2>/dev/null || true
-    dropped=$((dropped+1))
   done <<< "$old"
+  PRUNED="$dropped"
   [ "$dropped" = 0 ] || log "retention[$remote]: kept newest $keep dailies + $KEEP_MONTHLY monthly + $KEEP_YEARLY yearly firsts"
 }
 

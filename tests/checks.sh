@@ -3453,7 +3453,7 @@ SHIM
   echo 1 > /tmp/t67-lsf-rc; chmod 644 /tmp/t67-lsf-rc    # the account's rclone reads it
   sleep 1; RC_TRIES=1 tc67 backup >"$t67/b10.out" 2>&1 || true
   ! grep -q 'REMOTE-ALERT' "$t67/b10.out" && grep -q 'could not list' "$t67/b10.out" \
-    && ok "a listing that fails is reported as not checked, never as every kit deleted" \
+    && ok "an outage at backup time is not reported as every kit deleted" \
     || no "failed listing: $(grep -E 'REMOTE-ALERT|could not list' "$t67/b10.out" | tail -2 | tr '\n' '|')"
   echo 3 > /tmp/t67-lsf-rc; sleep 1; RC_TRIES=1 tc67 backup >"$t67/b11.out" 2>&1 || true
   grep -q 'REMOTE-ALERT.*ZERO kits' "$t67/b11.out" \
@@ -3464,6 +3464,83 @@ SHIM
     && ok "...and the drill says it could not list, where it said not to run a backup" \
     || no "drill on a failed listing: $(grep -E 'DELETION|cannot list|ERROR' "$t67/d10.out" | tail -2 | tr '\n' '|')"
   rm -f /usr/local/bin/rclone /tmp/t67-lsf-rc
+  # n2b) ...and the check that could not list is made once the upload is there. It was skipped,
+  # and the count recorded at the end of the same run took a deletion with it
+  cat > /usr/local/bin/rclone <<'SHIM'
+#!/bin/bash
+# A listing of every kit (its filter is a glob) fails once, or each time; a listing of one kit
+# never does. The kit named in /tmp/t67-victim is deleted while an upload runs. And nothing can be
+# deleted while /tmp/t67-nodelete is there (a key without that right, an append-only share).
+case "$(cat /tmp/t67-lsf-mode 2>/dev/null):$*" in
+  once:*lsf*\**) echo off > /tmp/t67-lsf-mode; echo "simulated outage" >&2; exit 1;;
+  each:*lsf*\**) echo "simulated outage" >&2; exit 1;;
+esac
+case " $* " in *" rcat "*.tar.zst.gpg*) v="$(cat /tmp/t67-victim 2>/dev/null)"; [ -z "$v" ] || rm -f "$v";; esac
+[ ! -e /tmp/t67-nodelete ] || case " $* " in *" delete "*) echo "simulated: no right to delete" >&2; exit 1;; esac
+# ...and while /tmp/t67-gone is there, a kit is gone by the time its delete is asked for
+[ ! -e /tmp/t67-gone ] || case " $* " in *" delete "*) for a; do case "$a" in *.tar.zst.gpg) rm -f "$a";; esac; done;; esac
+exec /usr/bin/rclone "$@"
+SHIM
+  chmod 755 /usr/local/bin/rclone
+  : > /tmp/t67-lsf-mode; : > /tmp/t67-victim; chmod 666 /tmp/t67-lsf-mode; chmod 644 /tmp/t67-victim   # the account's rclone rewrites the first
+  n67(){ tc67 list 2>/dev/null | grep 'tar\.zst\.gpg' | tail -1; }    # the newest kit at the destination
+  # an anchor that expects $1 more kits than are there, then the listing made to fail as $2 says
+  a67(){
+    l67="$(n67)"; c67="$(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')"
+    as67 sh -c "echo '$l67 $((c67 + $1)) $h67/kits2' > '$s67/expected'"; echo "$2" > /tmp/t67-lsf-mode
+  }
+  a67 1 once; sleep 1; tc67 backup >"$t67/b13.out" 2>&1 || true
+  grep -q "REMOTE-ALERT.*holds $c67 kits, expected >= $((c67 + 1)) (DELETION" "$t67/b13.out" && grep -q 'backup complete' "$t67/b13.out" \
+    && ok "a deletion check that could not list is made after the upload, without the kit just added" \
+    || no "late check, one kit short: $(grep -E 'REMOTE-ALERT|could not list|ERROR' "$t67/b13.out" | tail -3 | tr '\n' '|')"
+  a67 0 once; sleep 1; tc67 backup >"$t67/b14.out" 2>&1 || true
+  grep -q "checked once this run's upload is there" "$t67/b14.out" && ! grep -q 'REMOTE-ALERT' "$t67/b14.out" && grep -q 'backup complete' "$t67/b14.out" \
+    && ok "...and raises nothing when every kit is still there" \
+    || no "late check, nothing missing: $(grep -E 'REMOTE-ALERT|could not list|ERROR' "$t67/b14.out" | tail -3 | tr '\n' '|')"
+  a67 0 each; sleep 1; tc67 backup >"$t67/b15.out" 2>&1 || true; : > /tmp/t67-lsf-mode
+  grep -q 'REMOTE-ALERT: could not list .* before or after this upload' "$t67/b15.out" && grep -q 'backup complete' "$t67/b15.out" \
+    && ok "a destination that cannot be listed before or after the upload is reported, not passed over" \
+    || no "listing failed twice: $(grep -E 'REMOTE-ALERT|could not list|ERROR' "$t67/b15.out" | tail -3 | tr '\n' '|')"
+  [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) $((c67 + 1)) $h67/kits2" ] \
+    && ok "...and its anchor names the new kit and still expects every kit that was there" \
+    || no "anchor after a run that could not list: $(cat "$s67/expected" 2>&1) — wanted: $(n67) $((c67 + 1)) $h67/kits2"
+  as67 sh -c "echo '$(n67) $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')+ $h67/kits2' > '$s67/expected'"; c67="$(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg')"
+  echo each > /tmp/t67-lsf-mode; sleep 1; tc67 backup >"$t67/b15b.out" 2>&1 || true; : > /tmp/t67-lsf-mode
+  [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) $((c67 + 1))+ $h67/kits2" ] \
+    && ok "...and an older anchor keeps its mark through a check that could not be made" \
+    || no "older anchor after a run that could not list: $(cat "$s67/expected" 2>&1) — wanted: $(n67) $((c67 + 1))+ $h67/kits2"
+  # n2c) the count an anchor records follows from what the check saw. A fresh count after the
+  # upload took in a kit deleted while the upload ran, and that deletion was never reported
+  sleep 1; tc67 backup >"$t67/b16.out" 2>&1 || true
+  [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg') $h67/kits2" ] \
+    && [ "$(cat "$s67/expected2" 2>/dev/null)" = "$(n67) $(find "$t67/dest2" -maxdepth 1 -name '*.tar.zst.gpg' | wc -l | tr -d ' ') $t67/dest2" ] \
+    && [ "$(grep -c 'retention.*dropping' "$t67/b16.out")" -ge 2 ] \
+    && ok "an anchor's count is what the check saw, plus the new kit, less what retention dropped" \
+    || no "anchors after a run that pruned: $(cat "$s67/expected" "$s67/expected2" 2>&1 | tr '\n' '|') kits: $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg') and $(find "$t67/dest2" -maxdepth 1 -name '*.tar.zst.gpg' | wc -l | tr -d ' '); dropped: $(grep -c 'retention.*dropping' "$t67/b16.out")"
+  : > /tmp/t67-nodelete; sleep 1; tc67 backup >"$t67/b16b.out" 2>&1 || true; rm -f /tmp/t67-nodelete
+  grep -q 'retention.*could not delete' "$t67/b16b.out" \
+    && [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg') $h67/kits2" ] \
+    && ok "a kit retention could not delete is still there, and the anchor still counts it" \
+    || no "after deletes that failed: anchor $(cat "$s67/expected" 2>&1), kits there: $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg'), warnings: $(grep -c 'could not delete' "$t67/b16b.out")"
+  : > /tmp/t67-gone; sleep 1; tc67 backup >"$t67/b16c.out" 2>&1 || true; rm -f /tmp/t67-gone
+  grep -q 'retention.*dropping' "$t67/b16c.out" && ! grep -q 'could not delete' "$t67/b16c.out" \
+    && [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg') $h67/kits2" ] \
+    && ok "...and one that was gone before retention reached it is not counted as there" \
+    || no "after a kit gone before its delete: anchor $(cat "$s67/expected" 2>&1), kits there: $(tc67 list 2>/dev/null | grep -c 'tar\.zst\.gpg'), warnings: $(grep -c 'could not delete' "$t67/b16c.out")"
+  v67="$h67/kits2/$(tc67 list 2>/dev/null | grep 'tar\.zst\.gpg' | tail -2 | head -1)"; echo "$v67" > /tmp/t67-victim
+  sleep 1; tc67 backup >"$t67/b17.out" 2>&1 || true; : > /tmp/t67-victim
+  sleep 1; tc67 backup >"$t67/b18.out" 2>&1 || true
+  [ ! -e "$v67" ] && ! grep -q 'REMOTE-ALERT' "$t67/b17.out" && grep -q 'REMOTE-ALERT.*DELETION' "$t67/b18.out" \
+    && ok "a kit deleted while the upload ran is reported by the next backup" \
+    || no "deleted during the upload: victim $([ -e "$v67" ] && echo still there || echo gone); that run: $(grep -c REMOTE-ALERT "$t67/b17.out") alert(s); the next: $(grep -E 'REMOTE-ALERT|ERROR' "$t67/b18.out" | tail -2 | tr '\n' '|') anchor: $(cat "$s67/expected" 2>&1)"
+  # with no anchor to check against, the count is a first one; one that cannot be taken is 0,
+  # and the newest kit is recorded all the same
+  as67 rm -f "$s67/expected"; echo each > /tmp/t67-lsf-mode
+  sleep 1; tc67 backup >"$t67/b19.out" 2>&1 || true; : > /tmp/t67-lsf-mode
+  [ "$(cat "$s67/expected" 2>/dev/null)" = "$(n67) 0 $h67/kits2" ] \
+    && ok "a first anchor whose count could not be taken still names the newest kit" \
+    || no "first anchor without a count: $(cat "$s67/expected" 2>&1) — wanted: $(n67) 0 $h67/kits2"
+  rm -f /usr/local/bin/rclone /tmp/t67-lsf-mode /tmp/t67-victim /tmp/t67-nodelete /tmp/t67-gone
   # n3) a mirror folder that is not there is a drive that is not mounted, not kits deleted
   mv "$t67/dest2" "$t67/dest2.away"
   sleep 1; tc67 backup >"$t67/b12.out" 2>&1 || true
