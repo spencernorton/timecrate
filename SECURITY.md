@@ -34,10 +34,18 @@ Only the latest tagged release is supported.
   - What `/etc/timecrate.env` sets is removed from the environment of those processes, except
     names starting with `RCLONE_`.
 
-  Known limits: the post-quantum key files in the account's home are read by root's `openssl`
-  as key material (they cannot name a program). A terminal shared between root and the
-  account is protected from input injection by the kernel default
-  (`dev.tty.legacy_tiocsti=0`, Linux 6.2 and later), not by Timecrate.
+  Known limits:
+  - A kit holds what the include list names, read as root, and the keys a kit is encrypted to
+    and signed with are the account's to hold and to choose. So the account can read whatever
+    is in a kit: leave out of the include list what that account must not see.
+  - For the same reason `restore --to-root` installs what the account's signing key signed:
+    the pinned fingerprint is in the account's home. Where root must not take the account's
+    word for it, give the fingerprint from the escrow sheet:
+    `sudo TIMECRATE_EXPECT_SIGNER=<fingerprint> timecrate restore <timestamp> --to-root`.
+  - The post-quantum key files in the account's home are read by root's `openssl` as key
+    material (they cannot name a program).
+  - A terminal shared between root and the account is protected from input injection by the
+    kernel default (`dev.tty.legacy_tiocsti=0`, Linux 6.2 and later), not by Timecrate.
 - Every kit is encrypted to your public key (AES-256) and signed by a separate key. Every path that
   extracts one verifies that signature, against a pinned fingerprint, before writing anything. The
   remote is not trusted: a kit that is unsigned, or signed by another key, is refused.
